@@ -1,0 +1,4 @@
+qrcode==8.2
+pyinstaller>=6.12,<7
+Pillow==12.3.0
+pywebpush==2.5.0

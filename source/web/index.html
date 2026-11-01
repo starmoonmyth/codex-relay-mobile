@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#f5f7f9"><meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Codex 消息"><meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>Codex 手机消息助手</title><link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/icon-192.png"><link rel="stylesheet" href="/style.css">
+  <script src="/marked.js" defer></script><script src="/purify.js" defer></script><script src="/app.js" defer></script>
+</head>
+<body>
+  <section id="login" class="login" hidden>
+    <div class="appmark">⌘</div><h1>把任务交给电脑</h1>
+    <p>在手机上继续你的 Codex 聊天。</p>
+    <form id="pair-form"><label for="token">电脑配对码</label><input id="token" type="password" autocomplete="off" required placeholder="扫描电脑连接页上的二维码，也可粘贴配对码"><button class="primary" type="submit">连接这台电脑</button></form>
+    <p class="small">手机与电脑需连接同一个 Tailscale 网络。<br>配对后，可将此页面添加到手机主屏幕。</p>
+    <p id="pair-error" role="alert"></p>
+  </section>
+  <div id="workspace" class="workspace" hidden>
+    <button id="scrim" class="scrim" aria-label="关闭聊天列表" hidden></button>
+    <aside id="sidebar">
+      <div class="brand"><span class="appmark mini">⌘</span><strong>Codex 消息</strong><span class="small">手机助手</span></div>
+      <label class="device-label" for="device">任务运行在</label><select id="device" aria-label="选择电脑"></select>
+      <div class="search"><span>⌕</span><input id="search" type="search" placeholder="搜索聊天或项目" aria-label="搜索聊天"></div>
+      <div class="list-heading"><span>最近聊天</span><button id="refresh" aria-label="刷新聊天">↻</button></div>
+      <nav id="chat-list" aria-label="聊天列表"></nav>
+      <footer><span id="connection" role="status">正在连接</span><button id="logout">退出配对</button></footer>
+    </aside>
+    <main>
+      <header><button id="menu" class="icon-button" aria-label="打开聊天列表">☰</button><div class="heading"><h1 id="chat-title">选择一个聊天</h1><p id="chat-path">在这里继续桌面上的任务</p></div><button id="notifications-button" class="notification-button" aria-label="通知设置">通知</button><span id="turn-status" class="status">就绪</span></header>
+      <div id="conversation" class="conversation" tabindex="0" aria-label="聊天内容"><div class="empty"><span class="appmark">⌘</span><h2>电脑负责执行，手机继续交流。</h2><p>从聊天列表选择任务，接着说就好。</p></div></div>
+      <button id="jump" class="jump" hidden>↓ 最新消息</button>
+      <div class="composer-wrap"><div id="send-notice" role="status" class="send-notice"></div><form id="composer" class="composer"><div id="attachment-drafts" class="attachment-drafts" aria-label="待发送图片" hidden></div><textarea id="message" rows="2" maxlength="12000" aria-label="消息" placeholder="输入任务，或添加图片…" disabled></textarea><div class="composer-bottom"><input id="image-picker" type="file" accept="image/*" multiple hidden><button id="add-image" class="attach-button" type="button" aria-label="添加图片" title="选择照片或拍照" disabled>＋</button><span id="draft-label">消息将发送到原聊天</span><button id="send" class="send-button" type="submit" disabled aria-label="发送消息">↑</button></div></form><p class="hint">图片合计最多 32 MB · 发送后电脑继续工作</p></div>
+    </main>
+  </div>
+  <dialog id="notification-settings" class="notification-settings">
+    <form method="dialog"><button class="dialog-close" aria-label="关闭通知设置">×</button></form>
+    <h2>任务通知</h2><p>任务完成、失败、中断，或有新问题需要回复时提醒。覆盖这台电脑的聊天。</p>
+    <p id="notification-state" role="status"></p>
+    <div class="notification-actions"><button id="enable-local">开启页面内提醒</button><button id="enable-push" class="primary">开启系统推送</button><button id="test-local-notification">测试本机通知</button><button id="test-push">发送测试通知</button><button id="disable-notifications">关闭提醒</button></div>
+    <p id="notification-diagnostics" class="small" role="status"></p>
+    <p class="small">系统推送可在页面关闭后提醒。iPhone / iPad 需 iOS 16.4 及以上，先添加到主屏幕，再从主屏幕打开并允许通知。Mac 和 Windows 分别开启一次。</p>
+    <p class="small">电脑需保持开机，且能连接 Apple、Google、Mozilla 或 Microsoft 的推送服务。通知显示聊天标题和任务状态；点击后通过 Tailscale 返回聊天。桌面命令审批仍需在电脑处理。</p>
+  </dialog>
+  <div id="notification-toasts" class="notification-toasts" aria-live="polite"></div>
+</body>
+</html>
