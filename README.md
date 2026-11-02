@@ -2,6 +2,19 @@
 
 通过 Tailscale，在手机上继续 Mac 或 Windows 上已有的 Codex 聊天。电脑负责执行，手机可以发任务、上传图片、回复结构化提问并接收任务通知。
 
+## 先分清两个程序
+
+| 程序 | Windows / Mac 文件名 | 打开后看到什么 | 用途与发布状态 |
+| --- | --- | --- | --- |
+| **Codex 消息助手（电脑聊天版）** | `CodexRelay.exe` / `CodexRelay.app` | 独立聊天窗口，带聊天列表和输入框 | 在电脑上查看和继续已有 Codex 聊天。**当前仓库未发布这个独立桌面版的源码和安装包。** |
+| **Codex 手机消息助手（手机连接服务）** | `CodexRelayMobile.exe` / `CodexRelayMobile.app` | 电脑浏览器打开配对二维码和连接管理页 | 电脑运行服务，让手机通过 Tailscale 网页发送任务、查看回复和接收提醒。**这是当前仓库提供的程序。** |
+
+想在手机上操作，下载本仓库的 `CodexRelayMobile-*` 发布包；Windows EXE 和 Mac DMG 都安装在**电脑上**。手机访问配对后的网页，iPhone / Android 可将其添加为主屏幕应用（PWA），没有单独的 IPA / APK。
+
+想用独立的电脑聊天窗口，对应的是 `CodexRelay`；本仓库的手机连接服务不会启动那个窗口。两种助手可以分别使用，使用手机连接服务不需要另装电脑聊天版，也不会用手机连接服务覆盖电脑聊天版。
+
+文中“Codex 桌面应用”指需要另行安装的 **OpenAI 官方 Codex**，它负责原始聊天和任务执行，与上述两种社区助手分别对应不同程序。完整对应关系见 [程序与下载对照](docs/apps.md)。
+
 这是独立社区项目，与 OpenAI 无隶属关系。连接桌面聊天需要本机 Codex CLI、聊天数据库和桌面内部 IPC；接口会随桌面版本变化，兼容性不能覆盖所有版本。
 
 ## 功能
@@ -15,11 +28,11 @@
 
 ## 快速开始
 
-1. 从 [Releases](../../releases) 下载 Windows EXE 或 Mac Apple Silicon DMG。
+1. 从 [Releases](https://github.com/starmoonmyth/codex-relay-mobile/releases) 下载手机连接服务：Windows 选 `CodexRelayMobile-<版本>-Windows-x64.zip`，Mac Apple Silicon 选 `CodexRelayMobile-<版本>-macOS-arm64.dmg`。
 2. 电脑和手机安装并连接同一个 [Tailscale](https://tailscale.com/download) 网络，允许使用 Tailscale HTTPS 和 Serve。
 3. 在电脑上打开 Codex 桌面应用及目标聊天，确认其自带 CLI 可用。
-4. Windows 双击 EXE；Mac 将 DMG 中的应用拖入“应用程序”后打开。
-5. 助手启动后，电脑浏览器会打开连接页。用手机扫描二维码完成配对。
+4. 在电脑上运行：Windows 解压后双击 `CodexRelayMobile.exe`；Mac 将 DMG 中的 `CodexRelayMobile.app` 拖入“应用程序”后打开。
+5. 电脑浏览器会打开配对与连接管理页，这是手机连接服务的正常启动界面。用手机扫描二维码，在手机网页中选择聊天、发送任务和查看回复。
 6. iPhone 在 Safari 中“添加到主屏幕”，以后从主屏幕图标打开。Android 可安装为 PWA。
 
 程序默认监听 `127.0.0.1:8879`，首次运行会配置私有 Tailscale Serve HTTPS 端口 `8444`。如 Tailscale 提示需要先启用 HTTPS，请完成提示后重新启动助手。本机连接页是 <http://127.0.0.1:8879/connect>。
@@ -61,6 +74,8 @@ iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中�
 更多信息见 [配置与排障](docs/configuration.md)。
 
 ## 从源码运行
+
+下面的 `source/launcher.py` 启动手机连接服务和电脑配对页；独立电脑聊天版的源码不在本仓库中。
 
 需要 Python 3.13、Tailscale 和可用的 Codex 桌面应用。命令均在仓库根目录执行。
 
