@@ -4,7 +4,7 @@
 
 | 想做什么 | 对应程序 | 在哪台设备上运行 | 当前仓库提供什么 |
 | --- | --- | --- | --- |
-| 在电脑独立聊天窗口中查看、继续 Codex 聊天 | Codex 消息助手（电脑聊天版），`CodexRelay.exe` / `CodexRelay.app` | Windows / Mac | 当前未发布该程序的源码和安装包 |
+| 在电脑独立聊天窗口中查看、继续 Codex 文字聊天 | Codex 消息助手（电脑聊天版），`CodexRelay.exe` / `CodexRelay.app` | Windows / Mac | 独立项目：[源码](https://github.com/starmoonmyth/codex-relay-desktop) / [Windows、Mac 下载](https://github.com/starmoonmyth/codex-relay-desktop/releases/latest) |
 | 在手机发送任务、查看回复、上传图片、回答提问和接收提醒 | Codex 手机消息助手（手机连接服务），`CodexRelayMobile.exe` / `CodexRelayMobile.app` | 连接服务运行在 Windows / Mac；手机使用网页或 PWA | `source/` 源码和 Releases 中的 `CodexRelayMobile-*` 发布包 |
 | 在官方应用中管理原始聊天、使用模型并执行任务 | OpenAI 官方 Codex 桌面应用 | Windows / Mac | 需要用户单独安装，发行包不包含官方 Codex |
 
@@ -28,7 +28,7 @@
 
 手机首次扫描二维码后，在网页中选择这台电脑的聊天。iPhone 使用 Safari“添加到主屏幕”，Android 也可安装为 PWA；系统推送的要求见 [配置与排障](configuration.md#收不到通知)。电脑需要保持运行，手机和电脑的 Tailscale 需要在线。
 
-独立电脑聊天版打开的是带聊天列表、消息内容和输入框的原生窗口。对应文件名为 `CodexRelay`，本仓库暂不提供该版本的下载。
+独立电脑聊天版打开的是带聊天列表、消息内容和输入框的原生窗口。对应文件名为 `CodexRelay`，到 [电脑聊天版 Releases](https://github.com/starmoonmyth/codex-relay-desktop/releases/latest) 下载。
 
 ## 更新、停止和卸载
 
