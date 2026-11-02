@@ -27,6 +27,7 @@ from notifications import Notifications, question_answers
 from app_bridge import deliver_answer, desktop_model
 from codex_models import list_models
 from grok_backend import GrokData, default_grok_home, discover_grok_cli, deliver_grok, read_json
+from usage import Usage
 
 STATIC = pathlib.Path(__file__).resolve().parent / "web"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -62,6 +63,7 @@ class Relay:
         self.grok = GrokData(self.config.get('grok_home') or default_grok_home())
         self.grok_cli = self.config.get('grok_cli') or discover_grok_cli()
         self.grok_sender = grok_sender
+        self.usage = Usage()
         self.provider_mode = self.config.get("provider", "codex")
         if self.provider_mode not in ("codex", "claude", "grok", "all"):
             self.provider_mode = "codex"
@@ -657,7 +659,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.notifications.acknowledge(body.get('token'),body.get('stage'),body.get('error','')))
                     return
             if path == "/api/health" and not post:
-                self.response({"app": "CodexRelayMobile", "version": "1.3.5", "label": self.relay.config.get("label", socket.gethostname())})
+                self.response({"app": "CodexRelayMobile", "version": "1.3.6", "label": self.relay.config.get("label", socket.gethostname())})
                 return
             if path.startswith("/api/local/"):
                 if not self.local() or post:
@@ -729,6 +731,11 @@ class Handler(BaseHTTPRequestHandler):
                     self.response({"chats": [dataclasses.asdict(chat) for chat in self.relay.chats()]})
                 elif path.startswith("/api/chat/") and not post:
                     self.response(self.relay.snapshot(urllib.parse.unquote(path[len("/api/chat/"):])))
+                elif path.startswith('/api/usage/') and not post:
+                    chat = self.relay.chat(urllib.parse.unquote(path[len('/api/usage/'):]))
+                    if chat is None:
+                        raise ValueError('聊天不存在，请重新选择。')
+                    self.response(self.relay.usage.snapshot(chat, self.relay.data_for(chat).home))
                 elif path == "/api/send" and post:
                     self.response(self.relay.send(body.get("thread_id"), body.get("text"), body.get("request_id"), body.get("image_ids"),
                                                   claude_model=body.get("claude_model"), codex_model=body.get('codex_model'), grok_model=body.get('grok_model')))

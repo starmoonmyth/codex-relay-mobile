@@ -80,6 +80,16 @@ class MobileTests(unittest.TestCase):
         self.assertEqual(status,200)
         return headers['Set-Cookie'].split(';')[0]
 
+    def test_usage_requires_pairing_and_valid_chat(self):
+        self.assertEqual(self.request('/api/usage/chat-a')[0], 401)
+        cookie = self.paired()
+        with mock.patch.object(self.relay.usage, 'snapshot', return_value={'local': {'available': False}, 'balance': {'status': 'unavailable'}}) as snapshot:
+            status, _, raw = self.request('/api/usage/chat-a', cookie=cookie)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw)['balance']['status'], 'unavailable')
+            self.assertEqual(snapshot.call_args.args[0].id, 'chat-a')
+            self.assertEqual(self.request('/api/usage/missing', cookie=cookie)[0], 400)
+
     def upload_image(self, cookie=None):
         raw = (pathlib.Path(__file__).parent/'web/icon-192.png').read_bytes()
         body = {'name':'../../照片.png','data':base64.b64encode(raw).decode()}

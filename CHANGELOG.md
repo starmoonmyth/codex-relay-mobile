@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.6
+
+- Add a mobile usage and balance panel for the selected chat, including cumulative tokens, cache reads and the latest model call or Grok task.
+- Read compatible provider balances, quotas and actual daily deductions using locally configured API keys, with a one-minute query cache.
+- Identify CC Switch credential sources, distinguish recorded account limits from provider balances, and label expired snapshots or unavailable data.
+
 ## 1.3.5
 
 - Add Grok CLI text sessions, per-chat model selection, original-session resume and verified CLI completion receipts.

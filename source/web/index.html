@@ -31,9 +31,16 @@
       <header><button id="menu" class="icon-button" aria-label="打开聊天列表">☰</button><div class="heading"><h1 id="chat-title">选择一个聊天</h1><p id="chat-path">在这里继续桌面上的任务</p></div><button id="notifications-button" class="notification-button" aria-label="通知设置">通知</button><span id="turn-status" class="status" data-state="idle" role="status" aria-live="polite" aria-atomic="true">就绪</span></header>
       <div id="conversation" class="conversation" tabindex="0" aria-label="聊天内容"><div class="empty"><span class="appmark">⌘</span><h2>电脑负责执行，手机继续交流。</h2><p>从聊天列表选择任务，接着说就好。</p></div></div>
       <button id="jump" class="jump" hidden>↓ 最新消息</button>
-      <div class="composer-wrap"><div id="model-controls" class="model-bar" hidden><button id="choose-model" type="button" aria-label="选择模型">选择模型</button><span id="last-model"></span></div><div id="send-notice" role="status" class="send-notice"></div><form id="composer" class="composer"><div id="attachment-drafts" class="attachment-drafts" aria-label="待发送图片" hidden></div><textarea id="message" rows="2" maxlength="12000" aria-label="消息" placeholder="输入任务，或添加图片…" disabled></textarea><div class="composer-bottom"><input id="image-picker" type="file" accept="image/*" multiple hidden><button id="add-image" class="attach-button" type="button" aria-label="添加图片" title="选择照片或拍照" disabled>＋</button><span id="draft-label">消息将发送到原聊天</span><button id="send" class="send-button" type="submit" disabled aria-label="发送消息">↑</button></div></form><p class="hint">图片合计最多 32 MB · 发送后电脑继续工作</p></div>
+      <div class="composer-wrap"><div id="model-controls" class="model-bar" hidden><button id="choose-model" type="button" aria-label="选择模型">选择模型</button><button id="usage-button" type="button">用量与余额</button><span id="last-model"></span></div><div id="send-notice" role="status" class="send-notice"></div><form id="composer" class="composer"><div id="attachment-drafts" class="attachment-drafts" aria-label="待发送图片" hidden></div><textarea id="message" rows="2" maxlength="12000" aria-label="消息" placeholder="输入任务，或添加图片…" disabled></textarea><div class="composer-bottom"><input id="image-picker" type="file" accept="image/*" multiple hidden><button id="add-image" class="attach-button" type="button" aria-label="添加图片" title="选择照片或拍照" disabled>＋</button><span id="draft-label">消息将发送到原聊天</span><button id="send" class="send-button" type="submit" disabled aria-label="发送消息">↑</button></div></form><p class="hint">图片合计最多 32 MB · 发送后电脑继续工作</p></div>
     </main>
   </div>
+  <dialog id="usage-settings" class="notification-settings usage-settings" aria-labelledby="usage-title">
+    <form method="dialog"><button class="dialog-close" aria-label="关闭用量与余额">×</button></form>
+    <h2 id="usage-title">用量与余额</h2><p id="usage-chat" class="small"></p>
+    <div id="usage-content"></div><p id="usage-error" role="status"></p>
+    <button id="refresh-usage" type="button">刷新用量</button>
+    <p class="small">Token 来自此电脑的聊天记录，不等于账单金额。余额为所示 API Key 的服务商数据，最多每分钟查询一次。</p>
+  </dialog>
   <dialog id="model-settings" class="notification-settings model-settings">
     <form method="dialog"><button class="dialog-close" aria-label="关闭模型设置">×</button></form>
     <h2 id="model-title">这个聊天的模型</h2>

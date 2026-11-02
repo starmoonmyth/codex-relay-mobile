@@ -165,6 +165,7 @@ async function addImages(files) {
 }
 function resizeComposer() { $('message').style.height='auto'; $('message').style.height=Math.min($('message').scrollHeight,window.innerHeight*.3)+'px'; }
 async function selectChat(chat) {
+  if($('usage-settings').open)$('usage-settings').close();
   if(state.chat)storage.set(key('draft'),$('message').value);
   state.chat=chat;state.lastData=null;state.online=true;drawTurnStatus('loading');state.snapshot='';state.modelInfo=null;drawModel(null);storage.set('selected-chat',chat.id);
   $('chat-title').textContent=chat.title; $('chat-path').textContent=chat.cwd;
@@ -258,6 +259,74 @@ function drawProviderSelector() {
 function modelLabel(model) {
   return ({opus:'Opus（opus）',sonnet:'Sonnet（sonnet）',haiku:'Haiku（haiku）'})[model]||model;
 }
+function usageNumber(value) {return Number.isFinite(value)?new Intl.NumberFormat('zh-CN',{maximumFractionDigits:4}).format(value):'未提供';}
+function usageDate(value) {
+  if(value==null)return '';
+  const date=new Date(typeof value==='number'?value*1000:value);
+  return Number.isNaN(date.getTime())?'':date.toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
+}
+function usageMetric(label,value,detail='') {
+  const card=node('div','usage-metric');card.append(node('span','',label),node('strong','',value));
+  if(detail)card.append(node('small','',detail));return card;
+}
+function usageTokens(container,title,usage) {
+  if(!usage)return;
+  container.append(node('h3','',title));const grid=node('div','usage-grid');
+  grid.append(usageMetric('总 Token',usageNumber(usage.total_tokens)),usageMetric('输入',usageNumber(usage.input_tokens),'包含缓存读取和写入'),
+    usageMetric('输出',usageNumber(usage.output_tokens)),usageMetric('缓存读取',usageNumber(usage.cached_input_tokens)));
+  container.append(grid);
+  if(usage.cache_write_input_tokens||usage.reasoning_output_tokens)container.append(node('p','small',`缓存写入 ${usageNumber(usage.cache_write_input_tokens)} · 推理 ${usageNumber(usage.reasoning_output_tokens)}（已包含在输入或输出中）`));
+}
+function drawUsage(data) {
+  const content=$('usage-content');content.replaceChildren();
+  const local=data.local,balance=data.balance;
+  const account=node('section','usage-section');account.append(node('h3','','服务商余额 / 额度'));
+  if(balance.status==='ok'){
+    const amount=balance.remaining===-1?'不限额':balance.remaining==null?'接口未提供余额':usageNumber(balance.remaining);
+    account.append(usageMetric(balance.label,amount,balance.remaining>=0?balance.unit:''));
+    if(balance.today){const grid=node('div','usage-grid');grid.append(usageMetric('今日实际扣费',usageNumber(balance.today.cost),'USD'),usageMetric('今日请求',usageNumber(balance.today.requests)));account.append(grid);}
+    for(const limit of balance.limits){
+      const row=node('p','small',`${limit.label}：已用 ${usageNumber(limit.used)} / ${usageNumber(limit.limit)} ${limit.unit||balance.unit}`);
+      if(limit.resets_at)row.append(document.createTextNode(' · 重置 '+usageDate(limit.resets_at)));account.append(row);
+    }
+  }else account.append(node('p','small',balance.message));
+  if(balance.source)account.append(node('p','small',balance.source+' · '+balance.service));
+  if(balance.updated_at)account.append(node('p','small','查询时间 '+usageDate(balance.updated_at)));
+  content.append(account);
+  const session=node('section','usage-section');
+  if(local.available){usageTokens(session,'本聊天累计',local.total);usageTokens(session,data.provider==='grok'?'最近一轮任务':'最近一次模型调用',local.last);}
+  else session.append(node('h3','','本聊天用量'),node('p','small',local.error||'此聊天尚未记录 Token 用量，完成一次请求后再查看。'));
+  if(local.context_window)session.append(node('p','small','模型上下文容量 '+usageNumber(local.context_window)+' Token'));
+  if(local.updated_at)session.append(node('p','small','记录时间 '+usageDate(local.updated_at)));
+  if(local.windows.length){
+    session.append(node('h3','','账号额度快照'));
+    for(const window of local.windows){
+      const label=window.minutes?window.minutes>=1440?`${usageNumber(window.minutes/1440)} 天`:`${usageNumber(window.minutes/60)} 小时`:'额度周期';
+      const expired=window.resets_at&&window.resets_at*1000<Date.now();
+      const row=node('div','usage-window');row.append(node('span','',`${label}已用 ${usageNumber(window.used_percent)}%${expired?' · 快照已过期':''}`));
+      const bar=document.createElement('progress');bar.max=100;bar.value=Math.min(100,Math.max(0,window.used_percent));bar.setAttribute('aria-label',label+'额度已用比例');row.append(bar);
+      if(window.resets_at)row.append(node('small','small','重置时间 '+usageDate(window.resets_at)));session.append(row);
+    }
+    session.append(node('p','small','额度来自聊天最后记录，可能与中转站余额属于不同账号。'));
+  }
+  content.append(session);
+}
+async function refreshUsage() {
+  const chat=state.chat;if(!chat||$('refresh-usage').disabled)return;
+  $('refresh-usage').disabled=true;$('usage-error').textContent='正在读取…';
+  try{
+    const data=await api('/api/usage/'+encodeURIComponent(chat.id));
+    if(state.chat?.id!==chat.id||!$('usage-settings').open)return;
+    drawUsage(data);$('usage-error').textContent='';
+  }catch(error){if(state.chat?.id===chat.id)$('usage-error').textContent=error.message;}
+  finally{$('refresh-usage').disabled=false;}
+}
+$('usage-button').onclick=()=>{
+  if(!state.chat)return;
+  $('usage-chat').textContent=({codex:'Codex',claude:'Claude Code',grok:'Grok'})[state.chat.provider]+' · '+state.chat.title;
+  $('usage-content').replaceChildren();$('usage-settings').showModal();refreshUsage();
+};
+$('refresh-usage').onclick=refreshUsage;
 function drawModel(info) {
   state.modelInfo=info;
   const visible=!!state.chat;
@@ -510,7 +579,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.3.5'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.6'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -535,7 +604,7 @@ async function inspectNotificationWorker() {
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.3.5 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.6 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }
