@@ -47,7 +47,9 @@ class UsageTests(unittest.TestCase):
             return {'type': 'assistant', 'message': {'id': identity, 'usage': {
                 'input_tokens': 10, 'cache_read_input_tokens': 70, 'cache_creation_input_tokens': 20,
                 'output_tokens': output, 'output_tokens_details': {'thinking_tokens': 3}}}, **extra}
-        self.write([assistant('a', 5), assistant('a', 12), assistant('b', 8), assistant('side', 1000, isSidechain=True)])
+        partial = assistant('a', 12)
+        partial['message']['usage'].update(input_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0)
+        self.write([assistant('a', 5), partial, assistant('b', 8), assistant('side', 1000, isSidechain=True)])
         result = local_usage(dataclasses.replace(self.chat, provider='claude'))
         self.assertEqual(result['total']['input_tokens'], 200)
         self.assertEqual(result['total']['output_tokens'], 20)

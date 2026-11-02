@@ -84,6 +84,7 @@ def local_usage(chat):
                     identity = message.get('id') or entry.get('uuid') or str(index)
                     previous = messages.get(identity)
                     messages[identity] = {key: max(value, (previous or {}).get(key, 0)) for key, value in usage.items()}
+                    messages[identity]['total_tokens'] = messages[identity]['input_tokens'] + messages[identity]['output_tokens']
                     result['last'] = messages[identity]
             else:
                 update = (entry.get('params') or {}).get('update') or {}
