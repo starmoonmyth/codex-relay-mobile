@@ -10,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 from backend import DeliveryError
 from server import HTTPServer, Relay
@@ -117,7 +118,8 @@ class MobileTests(unittest.TestCase):
 
     def test_codex_model_catalog_and_confirmed_selection(self):
         cookie = self.paired()
-        status, _, raw = self.request('/api/codex/models', {'thread_id': 'chat-a'}, cookie=cookie)
+        with mock.patch('server.time.monotonic', return_value=5):
+            status, _, raw = self.request('/api/codex/models', {'thread_id': 'chat-a'}, cookie=cookie)
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(raw)['choices'], ['gpt-fixture', 'gpt-next'])
         status, _, raw = self.request('/api/codex/model', {'thread_id': 'chat-a', 'model': 'gpt-next'}, cookie=cookie)

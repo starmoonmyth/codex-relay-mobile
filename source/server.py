@@ -188,7 +188,7 @@ class Relay:
                 except (DeliveryError, ValueError, OSError) as error:
                     warning = str(error)
                 stamp, choices = self.codex_catalog_cache
-                if time.monotonic() - stamp > 300:
+                if not stamp or time.monotonic() - stamp > 300:
                     try:
                         choices = self.model_catalog(self.cli, self.data.home)
                         self.codex_catalog_cache = (time.monotonic(), choices)
@@ -203,7 +203,7 @@ class Relay:
     def refresh_codex_model(self, chat):
         with self.model_lock:
             stamp = self.model_refresh_attempts.get(chat.id, self.codex_model_cache.get(chat.id, (0, ''))[0])
-            if time.monotonic() - stamp < 30 or chat.id in self.model_refreshing:
+            if (stamp and time.monotonic() - stamp < 30) or chat.id in self.model_refreshing:
                 return
             self.model_refreshing.add(chat.id)
             self.model_refresh_attempts[chat.id] = time.monotonic()
