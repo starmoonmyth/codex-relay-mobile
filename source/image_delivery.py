@@ -54,7 +54,7 @@ def deliver_images(cli, home, chat, text, paths, request_id):
                     raise DeliveryError("Codex 图片投递失败：" + str(item["error"].get("message", "未知错误")), False)
                 return item.get("result", {})
 
-        request(1, "initialize", {"clientInfo": {"name": "codex_relay_mobile", "version": "1.2.3"},
+        request(1, "initialize", {"clientInfo": {"name": "codex_relay_mobile", "version": "1.3.2"},
                                    "capabilities": {"experimentalApi": True}})
         write({"method": "initialized"})
         inputs = ([{"type": "text", "text": text}] if text else [])

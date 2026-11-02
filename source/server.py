@@ -20,9 +20,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from backend import (CodexData, DeliveryError, MAX_MESSAGE, default_home, deliver,
                      discover_cli, display_user_text, new_receipt, state_dir)
+from claude_backend import (ClaudeData, default_claude_home, deliver_claude,
+                            discover_claude_cli, validate_model)
 from image_delivery import deliver_images
 from notifications import Notifications, question_answers
-from app_bridge import deliver_answer
+from app_bridge import deliver_answer, desktop_model
+from codex_models import list_models
 
 STATIC = pathlib.Path(__file__).resolve().parent / "web"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -36,12 +39,15 @@ def mobile_state():
 
 
 class Relay:
-    def __init__(self, root=None, config=None, sender=deliver, image_sender=deliver_images, answer_sender=deliver_answer):
+    def __init__(self, root=None, config=None, sender=deliver, image_sender=deliver_images,
+                 answer_sender=deliver_answer, claude_sender=deliver_claude,
+                 model_bridge=desktop_model, model_catalog=list_models):
         self.root = pathlib.Path(root or mobile_state())
         self.root.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             self.root.chmod(0o700)
         config_path = self.root / "config.json"
+        self.config_path = config_path
         self.config = config if config is not None else json.loads(config_path.read_text("utf-8"))
         self.port = int(self.config.get("port", 8879))
         self.origin = self.config["origin"].rstrip("/")
@@ -50,9 +56,22 @@ class Relay:
         self.hosts = {urllib.parse.urlsplit(origin).netloc for origin in self.origins}
         self.data = CodexData(pathlib.Path(self.config.get("codex_home") or default_home()))
         self.cli = self.config.get("cli") or discover_cli()
+        self.claude = ClaudeData(pathlib.Path(self.config.get("claude_home") or default_claude_home()))
+        self.claude_cli = self.config.get("claude_cli") or discover_claude_cli()
+        self.provider_mode = self.config.get("provider", "codex")
+        if self.provider_mode not in ("codex", "claude", "all"):
+            self.provider_mode = "codex"
         self.sender = sender
         self.image_sender = image_sender
         self.answer_sender = answer_sender
+        self.claude_sender = claude_sender
+        self.model_bridge = model_bridge
+        self.model_catalog = model_catalog
+        self.model_lock = threading.Lock()
+        self.codex_model_cache = {}
+        self.codex_catalog_cache = (0, [])
+        self.model_refreshing = set()
+        self.model_refresh_attempts = {}
         self.lock = threading.Lock()
         self.answer_lock = threading.Lock()
         self.attempts = {}
@@ -120,7 +139,121 @@ class Relay:
         return value
 
     def chat(self, identity):
-        return next((chat for chat in self.data.chats() if chat.id == identity), None)
+        return next((chat for chat in self.chats() if chat.id == identity), None)
+
+    def chats(self):
+        chats = []
+        if self.provider_mode in ("codex", "all"):
+            chats.extend(self.data.chats())
+        if self.provider_mode in ("claude", "all"):
+            chats.extend(self.claude.chats())
+        return sorted(chats, key=lambda chat: (chat.pinned, chat.updated_at), reverse=True)
+
+    def data_for(self, chat):
+        return self.claude if chat.provider == "claude" else self.data
+
+    def set_provider(self, provider):
+        if provider not in ("codex", "claude", "all"):
+            raise ValueError("provider 必须是 codex、claude 或 all。")
+        with self.lock:
+            self.provider_mode = provider
+            self.config["provider"] = provider
+            self.save_config()
+        return self.provider_info()
+
+    def save_config(self):
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = self.config_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(self.config, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporary, self.config_path)
+
+    def claude_model_info(self, chat):
+        selected = self.config.get("claude_chat_models", {}).get(chat.id, "")
+        default = self.config.get("claude_model") or ""
+        automatic = default or chat.model
+        choices = [chat.model, default, selected, "opus", "sonnet", "haiku"]
+        choices.extend(self.config.get("claude_models") or [])
+        return {"selected": selected, "requested_model": selected or automatic,
+                "automatic_model": automatic, "automatic_source": "default" if default else "history",
+                "last_response_model": chat.model,
+                "choices": list(dict.fromkeys(item for item in choices if isinstance(item, str) and item))}
+
+    def codex_model_info(self, chat, refresh=False):
+        warning = ''
+        if refresh:
+            with self.model_lock:
+                try:
+                    model = self.model_bridge(chat, self.data.home)
+                    self.codex_model_cache[chat.id] = (time.monotonic(), model)
+                except (DeliveryError, ValueError, OSError) as error:
+                    warning = str(error)
+                stamp, choices = self.codex_catalog_cache
+                if time.monotonic() - stamp > 300:
+                    try:
+                        choices = self.model_catalog(self.cli, self.data.home)
+                        self.codex_catalog_cache = (time.monotonic(), choices)
+                    except (ValueError, OSError) as error:
+                        warning = warning or str(error)
+        stamp, model = self.codex_model_cache.get(chat.id, (0, chat.model))
+        choices = list(dict.fromkeys([item for item in [model, chat.model, *self.codex_catalog_cache[1]] if item]))
+        return {'selected': model, 'requested_model': model, 'choices': choices,
+                'automatic_model': '', 'last_response_model': '', 'warning': warning,
+                'confirmed': bool(stamp)}
+
+    def refresh_codex_model(self, chat):
+        with self.model_lock:
+            stamp = self.model_refresh_attempts.get(chat.id, self.codex_model_cache.get(chat.id, (0, ''))[0])
+            if time.monotonic() - stamp < 30 or chat.id in self.model_refreshing:
+                return
+            self.model_refreshing.add(chat.id)
+            self.model_refresh_attempts[chat.id] = time.monotonic()
+        def refresh():
+            try:
+                with self.model_lock:
+                    model = self.model_bridge(chat, self.data.home)
+                    self.codex_model_cache[chat.id] = (time.monotonic(), model)
+            except (DeliveryError, ValueError, OSError):
+                pass
+            finally:
+                with self.model_lock:
+                    self.model_refreshing.discard(chat.id)
+        threading.Thread(target=refresh, daemon=True).start()
+
+    def set_codex_model(self, identity, model):
+        validate_model(model)
+        chat = self.chat(identity)
+        if chat is None or chat.provider != 'codex':
+            raise ValueError('请选择一个 Codex 聊天。')
+        with self.model_lock:
+            confirmed = self.model_bridge(chat, self.data.home, model=model)
+            if confirmed != model:
+                raise ValueError('桌面未确认所选模型，请刷新后重试。')
+            self.codex_model_cache[identity] = (time.monotonic(), confirmed)
+        return self.codex_model_info(chat)
+
+    def set_claude_model(self, identity, model):
+        if model != "":
+            validate_model(model)
+        with self.lock:
+            chat = self.chat(identity)
+            if chat is None or chat.provider != "claude":
+                raise ValueError("请选择一个 Claude Code 聊天。")
+            models = self.config.setdefault("claude_chat_models", {})
+            if model:
+                models[identity] = model
+            else:
+                models.pop(identity, None)
+            self.save_config()
+            return self.claude_model_info(chat)
+
+    def provider_info(self):
+        return {
+            "provider": self.provider_mode,
+            "available": {
+                "codex": bool(self.cli),
+                "claude": bool(self.claude_cli and self.claude.has_sessions()),
+            },
+        }
 
     @staticmethod
     def save_receipt(connection, receipt):
@@ -182,7 +315,7 @@ class Relay:
     def image_path(self, image):
         return self.root / "uploads" / (image["id"] + IMAGE_SUFFIX[image["mime"]])
 
-    def send(self, identity, text, request_id, image_ids=None, immediate=False):
+    def send(self, identity, text, request_id, image_ids=None, immediate=False, claude_model=None, codex_model=None):
         image_ids = [] if image_ids is None else image_ids
         if not isinstance(image_ids, list) or any(not isinstance(item, str) for item in image_ids):
             raise ValueError("图片列表无效。")
@@ -202,20 +335,35 @@ class Relay:
                     return old
                 queued = set(old.get('queue_ids', []))
                 chat = self.chat(identity)
-                if not queued or not queued <= self.data.queue_ids(identity, text) or not chat or self.data.receipt_message(old, self.data.history(chat)):
+                old_data = self.data_for(chat) if chat else self.data
+                if not queued or not queued <= old_data.queue_ids(identity, text) or not chat or old_data.receipt_message(old, old_data.history(chat)):
                     return old
                 retry_queue_ids = sorted(queued)
             chat = self.chat(identity)
             if chat is None:
                 raise ValueError("聊天不存在或已归档，请重新选择。")
+            data = self.data_for(chat)
             images = [self.image(item) for item in image_ids]
             if sum(image['size'] for image in images) > MAX_ATTACHMENT_BYTES:
                 raise ValueError('每条消息的图片总大小最多 32 MB，请移除部分图片后发送。')
-            messages = self.data.history(chat)
-            before = self.data.queue_ids(chat.id, text)
+            messages = data.history(chat)
+            before = data.queue_ids(chat.id, text)
             receipt = new_receipt(chat, text, messages)
             receipt["id"] = request_id
             receipt["images"] = images
+            receipt["provider"] = chat.provider
+            if chat.provider == "claude":
+                # Pin the model before starting the CLI; desktop UI settings are independent.
+                receipt["requested_model"] = validate_model(
+                    self.claude_model_info(chat)["requested_model"] if claude_model is None else claude_model)
+            elif codex_model is not None:
+                validate_model(codex_model)
+                current = self.model_bridge(chat, self.data.home)
+                with self.model_lock:
+                    self.codex_model_cache[chat.id] = (time.monotonic(), current)
+                if current != codex_model:
+                    raise DeliveryError('Codex 桌面模型已变化，请重新确认模型后发送。本次未发送。')
+                receipt['requested_model'] = current
             with self.connect() as connection:
                 if existing:
                     self.save_receipt(connection, receipt)
@@ -223,12 +371,20 @@ class Relay:
                     connection.execute("INSERT INTO deliveries VALUES (?,?,?,?,?)",
                         (request_id, identity, text, json.dumps(receipt, ensure_ascii=False), int(time.time())))
             try:
-                result = (self.answer_sender(chat,text,request_id,self.data.home,retry_queue_ids) if immediate else self.image_sender(self.cli, self.data.home, chat, text,
-                          [self.image_path(image) for image in images], request_id) if images
-                          else self.sender(self.cli, self.data.home, chat, text))
+                if chat.provider == "claude":
+                    result = self.claude_sender(
+                        self.claude_cli, chat, text, [self.image_path(image) for image in images],
+                        request_id, self.config.get("claude_permission_mode", "bypassPermissions"),
+                        self.root / "claude-runs", model=receipt["requested_model"])
+                else:
+                    result = (self.answer_sender(chat,text,request_id,self.data.home,retry_queue_ids) if immediate else self.image_sender(self.cli, self.data.home, chat, text,
+                              [self.image_path(image) for image in images], request_id) if images
+                              else self.sender(self.cli, self.data.home, chat, text))
                 receipt.update(result="sent", status="已入队 · 等待回执", warning=result.get("warning", False))
                 receipt["queue_ids"] = result.get("queue_ids", [])
                 receipt['delivery_mode'] = result.get('delivery_mode','queue')
+                if chat.provider == "claude":
+                    receipt['status'] = 'Claude Code 已启动 · 等待回复'
                 if immediate:
                     receipt['turn_id'] = result.get('turn_id')
                     receipt['status'] = '桌面已接收 · 已立即提交'
@@ -241,14 +397,14 @@ class Relay:
                 receipt.update(result="uncertain", status="投递结果待确认",
                                error="投递状态读取失败，请先检查原聊天，避免重复发送。")
             if retry_queue_ids and receipt['result'] != 'sent':
-                remaining = set(retry_queue_ids) & self.data.queue_ids(chat.id, text)
+                remaining = set(retry_queue_ids) & data.queue_ids(chat.id, text)
                 if remaining == set(retry_queue_ids) and receipt['result'] == 'failed':
                     receipt.update(result='sent', delivery_mode='queue', queue_ids=retry_queue_ids,
                                    status='旧回复仍在队列，请打开桌面聊天后点击立即提交')
                 elif remaining:
                     receipt.update(result='uncertain', queue_ids=sorted(remaining), status='投递结果待确认')
             try:
-                receipt["queue_ids"] = list(set(receipt["queue_ids"]) | (self.data.queue_ids(chat.id, text) - before))
+                receipt["queue_ids"] = list(set(receipt["queue_ids"]) | (data.queue_ids(chat.id, text) - before))
             except (sqlite3.Error, OSError):
                 pass
             with self.connect() as connection:
@@ -257,6 +413,9 @@ class Relay:
 
     def answer(self, identity, message_id, answers, request_id):
         with self.answer_lock:
+            chat = self.chat(identity)
+            if chat is not None and chat.provider == "claude":
+                raise ValueError("Claude Code 的提问回复请直接发送文字；原生结构化选项暂未开放。")
             snapshot = self.snapshot(identity)
             message = next((item for item in snapshot['messages'] if item['id'] == message_id and item['questions']), None)
             if message is None:
@@ -279,21 +438,24 @@ class Relay:
         chat = self.chat(identity)
         if chat is None:
             raise ValueError("聊天不存在或已归档。")
-        messages = self.data.history(chat)
-        queue_ids = self.data.queue_ids(identity)
+        data = self.data_for(chat)
+        if chat.provider == 'codex':
+            self.refresh_codex_model(chat)
+        messages = data.history(chat)
+        queue_ids = data.queue_ids(identity)
         with self.connect() as connection:
             receipts = [json.loads(row[0]) for row in connection.execute(
                 "SELECT receipt FROM deliveries WHERE thread_id=? ORDER BY created DESC, rowid DESC LIMIT 30", (identity,))]
             for receipt in receipts:
-                match = self.data.receipt_message(receipt, messages)
+                match = data.receipt_message(receipt, messages)
                 if not match and receipt.get('result') == 'sent' and not set(receipt.get('queue_ids', [])) & queue_ids:
-                    match = self.data.historical_receipt_message(receipt)
+                    match = data.historical_receipt_message(receipt)
                 if match:
                     receipt["seen_in_history"] = True
                     receipt['message_id'] = match.id
                     receipt['turn_id'] = match.turn_id
                 if receipt["status"] != "正在投递":
-                    receipt["status"] = self.data.receipt_status(receipt, messages, queue_ids)
+                    receipt["status"] = data.receipt_status(receipt, messages, queue_ids)
                 self.save_receipt(connection, receipt)
         output = []
         answers = {}
@@ -318,14 +480,18 @@ class Relay:
                     answer_status.setdefault(key, status)
                     answer_requests.setdefault(key, receipt['id'])
         uploaded = {}
+        requested_models = {}
         for receipt in receipts:
-            match = self.data.receipt_message(receipt, messages)
+            match = data.receipt_message(receipt, messages)
             if match and receipt.get("images"):
                 uploaded[match.id] = receipt["images"]
+            if match and receipt.get("requested_model"):
+                requested_models[match.id] = receipt["requested_model"]
         for message in messages:
             item = dataclasses.asdict(message)
             item["images"] = uploaded.get(message.id, [])
             item["image_count"] = len(message.images)
+            item["requested_model"] = requested_models.get(message.id, "")
             item["text"] = display_user_text(message.text) if message.role == "user" else message.text
             item['questions'] = [dict(question, index=index, answer=answers.get((message.id, index)),
                                       reply_status=answer_status.get((message.id, index), ''),
@@ -335,7 +501,9 @@ class Relay:
                 item["text"] = item["text"][:48000]
                 output.append(item)
         return {"chat": dataclasses.asdict(chat), "messages": output,
-                "receipts": list(reversed(receipts)), "turn": self.data.turn(identity)}
+                "claude_model": self.claude_model_info(chat) if chat.provider == "claude" else None,
+                "codex_model": self.codex_model_info(chat) if chat.provider == 'codex' else None,
+                "receipts": list(reversed(receipts)), "turn": data.turn(identity)}
 
 
 class HTTPServer(ThreadingHTTPServer):
@@ -353,7 +521,7 @@ class HTTPServer(ThreadingHTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "CodexRelayMobile/1.2"
+    server_version = "CodexRelayMobile/1.3"
 
     @property
     def relay(self):
@@ -426,11 +594,14 @@ class Handler(BaseHTTPRequestHandler):
                     self.response({"ok": True})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
+                if path == "/api/local/provider" and self.local():
+                    self.response(self.relay.set_provider(body.get("provider")))
+                    return
                 if path == '/api/notifications/ack':
                     self.response(self.relay.notifications.acknowledge(body.get('token'),body.get('stage'),body.get('error','')))
                     return
             if path == "/api/health" and not post:
-                self.response({"app": "CodexRelayMobile", "version": "1.2.3", "label": self.relay.config.get("label", socket.gethostname())})
+                self.response({"app": "CodexRelayMobile", "version": "1.3.4", "label": self.relay.config.get("label", socket.gethostname())})
                 return
             if path.startswith("/api/local/"):
                 if not self.local() or post:
@@ -438,7 +609,8 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 link = self.relay.origin + "/#pair=" + self.relay.token
                 if path == "/api/local/setup":
-                    self.response({"link": link, "origin": self.relay.origin, "label": self.relay.config.get("label"), "token": self.relay.token})
+                    self.response({"link": link, "origin": self.relay.origin, "label": self.relay.config.get("label"),
+                                   "token": self.relay.token, **self.relay.provider_info()})
                 elif path == "/api/local/qr.svg":
                     import qrcode
                     import qrcode.image.svg
@@ -460,7 +632,8 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == "/api/meta" and not post:
                     self.response({"label": self.relay.config.get("label"), "origin": self.relay.origin,
                                    "peers": self.relay.config.get("peers", []), "max_message": MAX_MESSAGE,
-                                   "max_attachment_bytes": MAX_ATTACHMENT_BYTES})
+                                   "max_attachment_bytes": MAX_ATTACHMENT_BYTES,
+                                   **self.relay.provider_info()})
                 elif path == '/api/notifications' and not post:
                     self.response(self.relay.notifications.settings(self.cookie()))
                 elif path == '/api/notifications' and post:
@@ -474,6 +647,17 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.notifications.client_info(self.cookie(),body))
                 elif path == '/api/notifications/sync' and post:
                     self.response(self.relay.notifications.sync(self.cookie(),body.get('subscription')))
+                elif path == '/api/provider' and post:
+                    self.response(self.relay.set_provider(body.get('provider')))
+                elif path == '/api/claude/model' and post:
+                    self.response(self.relay.set_claude_model(body.get('thread_id'), body.get('model')))
+                elif path == '/api/codex/model' and post:
+                    self.response(self.relay.set_codex_model(body.get('thread_id'), body.get('model')))
+                elif path == '/api/codex/models' and post:
+                    chat = self.relay.chat(body.get('thread_id'))
+                    if chat is None or chat.provider != 'codex':
+                        raise ValueError('请选择一个 Codex 聊天。')
+                    self.response(self.relay.codex_model_info(chat, refresh=True))
                 elif path.startswith('/api/notifications/delivery/') and not post:
                     self.response(self.relay.notifications.delivery(self.cookie(),path.rsplit('/',1)[-1]))
                 elif path == '/api/answer' and post:
@@ -484,11 +668,12 @@ class Handler(BaseHTTPRequestHandler):
                     picture = self.relay.image(path[len("/api/image/"):])
                     self.response(self.relay.image_path(picture).read_bytes(), mime=picture["mime"])
                 elif path == "/api/chats" and not post:
-                    self.response({"chats": [dataclasses.asdict(chat) for chat in self.relay.data.chats()]})
+                    self.response({"chats": [dataclasses.asdict(chat) for chat in self.relay.chats()]})
                 elif path.startswith("/api/chat/") and not post:
                     self.response(self.relay.snapshot(urllib.parse.unquote(path[len("/api/chat/"):])))
                 elif path == "/api/send" and post:
-                    self.response(self.relay.send(body.get("thread_id"), body.get("text"), body.get("request_id"), body.get("image_ids")))
+                    self.response(self.relay.send(body.get("thread_id"), body.get("text"), body.get("request_id"), body.get("image_ids"),
+                                                  claude_model=body.get("claude_model"), codex_model=body.get('codex_model')))
                 else:
                     self.response({"error": "找不到此操作。"}, 404)
                 return
@@ -509,6 +694,8 @@ class Handler(BaseHTTPRequestHandler):
             self.response({"error": str(error)}, 400)
         except (BrokenPipeError, ConnectionResetError):
             pass
+        except DeliveryError as error:
+            self.response({'error': str(error)}, 409)
         except (OSError, sqlite3.Error) as error:
             self.response({"error": f"读取或投递失败：{error}"}, 503)
 

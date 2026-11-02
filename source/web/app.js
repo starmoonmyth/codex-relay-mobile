@@ -1,5 +1,5 @@
 const $ = id => document.getElementById(id);
-const state = {chat:null,chats:[],meta:null,busy:false,refreshing:false,snapshot:'',lastList:0};
+const state = {chat:null,chats:[],meta:null,busy:false,refreshing:false,snapshot:'',lastList:0,modelInfo:null,modelSaving:false};
 const attachmentDrafts = new Map();
 const storage = {
   get(key, fallback='') { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } },
@@ -12,7 +12,7 @@ function notice(text) { $('send-notice').textContent = text; }
 function connection(text, online) { $('connection').textContent=text; $('connection').classList.toggle('online',online); }
 async function api(path, body) {
   let response;
-  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),path==='/api/send'||path==='/api/answer'?50000:15000);
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),path==='/api/send'||path==='/api/answer'||path.startsWith('/api/codex/model')?90000:15000);
   try {response = await fetch(path, {cache:'no-store', credentials:'same-origin',
     signal:controller.signal,
     ...(body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {})});}
@@ -20,7 +20,7 @@ async function api(path, body) {
   finally{clearTimeout(timeout);}
   const value = await response.json();
   if(response.status===401) { showLogin(); throw Error('请先配对这台电脑。'); }
-  if(!response.ok) throw Error(value.error || `请求失败 (${response.status})`);
+  if(!response.ok) {const error=Error(value.error || `请求失败 (${response.status})`);error.status=response.status;throw error;}
   return value;
 }
 function showLogin() { document.body.classList.remove('chat-layout','keyboard-open');$('workspace').hidden=true;$('login').hidden=false; }
@@ -34,10 +34,10 @@ function drawList() {
     const button=node('button','chat'+(chat.id===state.chat?.id?' active':''));
     button.append(node('span','chat-name',(chat.pinned?'⌁ ':'')+chat.title));
     const meta=node('span','chat-meta'); const project=chat.cwd.replaceAll('\\','/').split('/').filter(Boolean).pop()||'未指定项目';
-    meta.append(node('span','project',project),node('span','',timeLabel(chat.updated_at)));button.append(meta);
+    meta.append(node('span','project',(chat.provider==='claude'?'Claude · ':'Codex · ')+project),node('span','',timeLabel(chat.updated_at)));button.append(meta);
     button.onclick=()=>selectChat(chat); list.append(button);
   }
-  if(!chats.length)list.append(node('p','small',state.chats.length?'没有匹配的聊天。':'还没有聊天。请先在电脑的 Codex 中打开一个聊天。'));
+  if(!chats.length)list.append(node('p','small',state.chats.length?'没有匹配的聊天。':'还没有聊天。请先在电脑的 Codex 或 Claude Code 中打开一个聊天。'));
 }
 function imagesFor(id=state.chat?.id) {
   if(!id)return [];
@@ -52,7 +52,9 @@ function imageIds(id=state.chat?.id) {return imagesFor(id).filter(image=>image.i
 function sameImages(a,b) {return JSON.stringify(a||[])===JSON.stringify(b||[]);}
 function updateSend() {
   const images=imagesFor(),loading=images.some(image=>image.uploading||image.failed);
-  $('send').disabled=!state.chat||(!$('message').value.trim()&&!images.length)||state.busy||loading;
+  const modelRequired=state.chat?.provider==='claude'&&!state.modelInfo?.requested_model;
+  $('send').disabled=!state.chat||(!$('message').value.trim()&&!images.length)||state.busy||loading||modelRequired||state.modelSaving;
+  $('choose-model').disabled=state.busy||state.modelSaving;
   $('add-image').disabled=!state.chat||state.busy;
   for(const button of $('attachment-drafts').querySelectorAll('button'))button.disabled=state.busy;
 }
@@ -118,7 +120,7 @@ async function addImages(files) {
 function resizeComposer() { $('message').style.height='auto'; $('message').style.height=Math.min($('message').scrollHeight,window.innerHeight*.3)+'px'; }
 async function selectChat(chat) {
   if(state.chat)storage.set(key('draft'),$('message').value);
-  state.chat=chat;state.snapshot='';storage.set('selected-chat',chat.id);
+  state.chat=chat;state.snapshot='';state.modelInfo=null;drawModel(null);storage.set('selected-chat',chat.id);
   $('chat-title').textContent=chat.title; $('chat-path').textContent=chat.cwd;
   $('message').disabled=false;$('message').value=storage.get(key('draft'));resizeComposer();drawImages();updateSend();notice('');
   $('conversation').replaceChildren(node('p','small','正在读取聊天…'));drawList();drawer(false);
@@ -138,6 +140,7 @@ function markdown(text) {
   return wrapper;
 }
 function renderSnapshot(data, force) {
+  drawModel(data.chat.provider==='claude'?data.claude_model:data.codex_model);
   const box=$('conversation');const near=box.scrollHeight-box.scrollTop-box.clientHeight<100;
   const signature=JSON.stringify(data);if(signature===state.snapshot)return;
   state.snapshot=signature;
@@ -148,13 +151,15 @@ function renderSnapshot(data, force) {
       if(m.images?.length)bubble.append(imageGallery(m.images));
       else if(m.image_count)bubble.append(node('span','small',`图片附件 ${m.image_count} 张 · 可在电脑查看`));
       if(m.text)bubble.append(node('div','user-text',m.text));
+      if(m.requested_model)bubble.append(node('div','small','请求模型：'+m.requested_model));
     }
-    else{bubble.append(node('span','speaker',m.questions?.length?'CODEX · 需要回复':m.phase==='commentary'?'CODEX · 进展':'CODEX'));if(m.questions?.length)bubble.append(questionCard(m,data.chat.id));else bubble.append(markdown(m.text));}
+    else{const name=data.chat.provider==='claude'?'CLAUDE · '+(m.model||'模型未记录'):'CODEX';bubble.append(node('span','speaker',m.questions?.length?name+' · 需要回复':m.phase==='commentary'?name+' · 进展':name));if(m.questions?.length)bubble.append(questionCard(m,data.chat.id));else bubble.append(markdown(m.text));}
     fragment.append(bubble);
   }
   for(const receipt of data.receipts) {
     if(receipt.seen_in_history)continue;
     const card=node('article','pending');card.append(node('div','pending-text',receipt.display_text??receipt.text),node('div','pending-status',receipt.status));
+    if(receipt.requested_model)card.append(node('div','small','请求模型：'+receipt.requested_model));
     if(receipt.images?.length)card.prepend(imageGallery(receipt.images));
     if(receipt.error)card.append(node('div','pending-error',receipt.error));fragment.append(card);
   }
@@ -175,7 +180,7 @@ function settle(receipt,attempt,chatId) {
     if(sameImages(imageIds(chatId),attempt.image_ids)){attachmentDrafts.set(chatId,[]);saveImages(chatId);if(state.chat?.id===chatId)drawImages();}
     if(state.chat?.id===chatId) {
       if($('message').value===attempt.text){$('message').value='';resizeComposer();}
-      notice(receipt.status==='已完成'?'已完成。':receipt.warning?'消息已入队，CLI 有提示，请查看原聊天。':'已入队，电脑接收后会在这里显示回复。');
+      notice(receipt.status==='已完成'?'已完成。':receipt.provider==='claude'?'Claude Code 已启动，回复会在这里更新。':receipt.warning?'消息已入队，CLI 有提示，请查看原聊天。':'已入队，电脑接收后会在这里显示回复。');
     }
   }else if(receipt.result==='failed') {
     storage.remove(key('pending',chatId));
@@ -191,12 +196,69 @@ async function refreshChat(force=false) {
 async function loadChats() {
   const data=await api('/api/chats');state.chats=data.chats;state.lastList=Date.now();drawList();
 }
+function drawProviderSelector() {
+  const select=$('provider'); if(!select||!state.meta)return;
+  const labels={codex:'Codex',claude:'Claude Code',all:'Codex + Claude Code'};
+  select.value=state.meta.provider||'codex';
+  for(const option of select.options) {
+    option.disabled=option.value!=='all'&&!state.meta.available?.[option.value];
+    option.textContent=labels[option.value]+(option.disabled?'（此电脑未检测到）':'');
+  }
+}
+function modelLabel(model) {
+  return ({opus:'Opus（opus）',sonnet:'Sonnet（sonnet）',haiku:'Haiku（haiku）'})[model]||model;
+}
+function drawModel(info) {
+  state.modelInfo=info;
+  const visible=!!state.chat;
+  $('model-controls').hidden=!visible;
+  $('choose-model').textContent=info?.requested_model?(state.chat?.provider==='codex'?'聊天模型：':'发送模型：')+modelLabel(info.requested_model):info?'请选择发送模型':'正在读取模型…';
+  $('last-model').textContent=state.chat?.provider==='codex'?(info?.confirmed?'最近与桌面确认 · 下轮生效':'沿用原聊天 · 点击选择'):info?.last_response_model?'最近回复：'+info.last_response_model:'最近回复模型未记录';
+  updateSend();
+}
+$('choose-model').onclick=async()=>{
+  const id=state.chat?.id,provider=state.chat?.provider;if(!id)return;
+  const codex=provider==='codex';
+  $('model-title').textContent='这个聊天的 '+(codex?'Codex':'Claude')+' 模型';
+  $('model-description').textContent=codex?'同步修改原聊天的下一轮模型，电脑端也会使用这个设置。进行中的回复继续使用原模型。':'从这里发送的任务使用下方模型，与 Claude 桌面端分别设置。修改在下次发送时生效。';
+  $('model-help').textContent=codex?'模型列表来自此电脑的 Codex。队列在执行时使用原聊天的模型；电脑端后续修改也会影响排队任务。中转站可填写模型 ID。':'Opus、Sonnet、Haiku 是 Claude Code 别名。中转站可填写完整模型 ID。回复标注接口报告的模型。';
+  const select=$('model-choice');select.replaceChildren();$('model-error').textContent='';$('custom-model').hidden=true;
+  $('save-model').disabled=true;$('model-settings').showModal();
+  state.modelSaving=true;updateSend();
+  try{
+    const info=codex?await api('/api/codex/models',{thread_id:id}):state.modelInfo;
+    if(state.chat?.id!==id){$('model-settings').close();return;}
+    if(!info)throw Error('模型尚未读取，请稍后重试。');
+    drawModel(info);
+    if(!codex){const automatic=node('option','',info.automatic_model?(info.automatic_source==='default'?'使用此电脑助手默认：':'沿用最近回复：')+info.automatic_model:'请选择模型');automatic.value='';automatic.disabled=!info.automatic_model;select.append(automatic);}
+    for(const model of info.choices){const option=node('option','',modelLabel(model));option.value=model;select.append(option);}
+    const custom=node('option','','自定义模型 ID…');custom.value='__custom__';select.append(custom);
+    select.value=info.selected||(codex?'__custom__':'');$('model-id').value='';$('custom-model').hidden=select.value!=='__custom__';
+    $('model-error').textContent=info.warning||'';$('save-model').disabled=false;
+  }catch(error){$('model-error').textContent=error.message;}
+  finally{state.modelSaving=false;updateSend();}
+};
+$('model-choice').onchange=()=>{$('custom-model').hidden=$('model-choice').value!=='__custom__';};
+$('model-form').onsubmit=async event=>{
+  event.preventDefault();const id=state.chat?.id;if(!id||state.modelSaving)return;
+  const choice=$('model-choice').value,model=choice==='__custom__'?$('model-id').value.trim():choice;
+  if(choice==='__custom__'&&!model){$('model-error').textContent='请填写模型 ID。';return;}
+  if(!model&&!state.modelInfo.automatic_model){$('model-error').textContent='请选择模型。';return;}
+  state.modelSaving=true;$('save-model').disabled=true;updateSend();
+  try{
+    const info=await api(state.chat.provider==='codex'?'/api/codex/model':'/api/claude/model',{thread_id:id,model});
+    if(state.chat?.id===id){drawModel(info);notice((state.chat.provider==='codex'?'已同步原聊天下一轮模型：':'下次发送使用：')+modelLabel(info.requested_model));}
+    $('model-settings').close();
+  }catch(error){$('model-error').textContent=error.message;}
+  finally{state.modelSaving=false;$('save-model').disabled=false;updateSend();}
+};
 async function boot() {
   try {
     state.meta=await api('/api/meta');$('login').hidden=true;$('workspace').hidden=false;document.body.classList.add('chat-layout');updateViewport();
     $('device').replaceChildren();
     const peers=state.meta.peers.length?state.meta.peers:[{label:state.meta.label,origin:state.meta.origin}];
     for(const peer of peers) {const option=node('option','',peer.label+(peer.origin===state.meta.origin?' · 此电脑':''));option.value=peer.origin;option.selected=peer.origin===state.meta.origin;$('device').append(option);}
+    drawProviderSelector();
     await loadChats();connection('已连接 · '+state.meta.label,true);
     const target=new URLSearchParams(location.search).get('chat')||storage.get('selected-chat');
     const chat=state.chats.find(c=>c.id===target);
@@ -209,11 +271,11 @@ $('pair-form').onsubmit=async event=>{event.preventDefault();try{await api('/api
 $('composer').onsubmit=async event=>{
   event.preventDefault();if(state.busy||!state.chat||$('send').disabled)return;
   const id=state.chat.id,text=$('message').value,image_ids=imageIds();const previous=pending(id);
-  const attempt=previous?.text===text&&sameImages(previous.image_ids,image_ids)?previous:{thread_id:id,text,image_ids,request_id:crypto.randomUUID()};
+  const attempt=previous?.text===text&&sameImages(previous.image_ids,image_ids)?previous:{thread_id:id,text,image_ids,request_id:crypto.randomUUID(),...(state.chat.provider==='claude'?{claude_model:state.modelInfo.requested_model}:state.modelInfo?.requested_model?{codex_model:state.modelInfo.requested_model}:{})};
   storage.set(key('pending',id),JSON.stringify(attempt));storage.set(key('draft',id),text);
   state.busy=true;updateSend();notice('正在投递…');
   try {const receipt=await api('/api/send',attempt);settle(receipt,attempt,id);if(state.chat?.id===id)await refreshChat(true);}
-  catch(error){if(state.chat?.id===id)notice(error.message+' 原文再次发送会确认同一条消息，不会重复入队。');}
+  catch(error){if(error.status===409){storage.remove(key('pending',id));if(state.chat?.id===id){await refreshChat();notice(error.message);}}else if(state.chat?.id===id)notice(error.message+' 原文再次发送会确认同一条消息，不会重复入队。');}
   finally{state.busy=false;updateSend();}
 };
 $('message').oninput=()=>{if(state.chat)storage.set(key('draft'),$('message').value);resizeComposer();updateSend();};
@@ -226,6 +288,18 @@ $('message').onkeydown=event=>{if(event.key==='Enter'&&(event.metaKey||event.ctr
 $('search').oninput=drawList;$('menu').onclick=()=>drawer(true);$('scrim').onclick=()=>drawer(false);
 $('refresh').onclick=()=>Promise.all([loadChats(),refreshChat(true)]).catch(error=>notice(error.message));
 $('device').onchange=()=>{const url=$('device').value;if(url===state.meta.origin)return;if(state.chat)storage.set(key('draft'),$('message').value);location.assign(url);};
+$('provider').onchange=async()=>{
+  const select=$('provider'),previous=state.meta.provider||'codex';select.disabled=true;
+  try {
+    const info=await api('/api/provider',{provider:select.value});Object.assign(state.meta,info);drawProviderSelector();
+    await loadChats();
+    const current=state.chat&&state.chats.find(chat=>chat.id===state.chat.id);
+    if(current) await selectChat(current);
+    else {state.chat=null;drawModel(null);$('chat-title').textContent='选择一个聊天';$('chat-path').textContent='在这里继续桌面上的任务';$('message').disabled=true;drawList();}
+    notice('已切换到 '+({codex:'Codex',claude:'Claude Code',all:'Codex + Claude Code'}[state.meta.provider]||state.meta.provider));
+  } catch(error) {select.value=previous;notice(error.message);}
+  finally {select.disabled=false;drawProviderSelector();}
+};
 $('logout').onclick=async()=>{await api('/api/logout',{});state.chat=null;showLogin();drawer(false);};
 $('jump').onclick=()=>{$('conversation').scrollTop=$('conversation').scrollHeight;$('jump').hidden=true;};
 $('conversation').onscroll=()=>{const box=$('conversation');if(box.scrollHeight-box.scrollTop-box.clientHeight<100)$('jump').hidden=true;};
@@ -386,7 +460,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.2.3'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.4'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -411,7 +485,7 @@ async function inspectNotificationWorker() {
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.2.3 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.4 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }

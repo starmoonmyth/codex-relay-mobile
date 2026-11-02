@@ -1,5 +1,7 @@
 # 配置与排障
 
+本文针对 **Codex 手机消息助手（`CodexRelayMobile` 手机连接服务）**。独立电脑聊天版叫 `CodexRelay`，不在本仓库的源码和发行包中。文件名、用途与下载关系见 [程序与下载对照](apps.md)。
+
 ## 启动配置
 
 首次启动会根据本机 Tailscale 状态生成 `config.json`。默认 HTTP 端口为 `8879`，Tailscale HTTPS 端口为 `8444`。如果 HTTPS 端口已由其他服务使用，程序会提示冲突，不覆盖已有代理。
@@ -15,16 +17,47 @@
 | `peers` | 设备切换列表，元素包含 `label` 和 `origin` |
 | `codex_home` | 可选，Codex 数据目录，默认 `CODEX_HOME` 或 `~/.codex` |
 | `cli` | 可选，本机 Codex CLI 可执行文件的绝对路径 |
+| `provider` | `codex`（默认）、`claude` 或 `all`；也可在本机连接页切换 |
+| `claude_home` | 可选，Claude Code 数据目录，默认 `~/.claude` |
+| `claude_cli` | 可选，Claude Code CLI 的绝对路径；Windows 会自动查找 VS Code 扩展内置 CLI |
+| `claude_model` | 可选，此电脑助手的默认 Claude 模型；聊天自己的选择优先 |
+| `claude_models` | 可选，模型选择框中额外列出的完整模型 ID 数组 |
+| `claude_chat_models` | 手机为各个 Claude 聊天保存的模型选择，由界面管理 |
+| `claude_permission_mode` | Claude Code CLI 权限模式，默认 `bypassPermissions`；可改为 `acceptEdits` 或 `manual` |
 
 程序会尝试发现应用内置的 Codex CLI。Windows 默认检查 `%LOCALAPPDATA%\OpenAI\Codex\bin` 和 PATH；Mac 检查 `/Applications`、`~/Applications`、Homebrew 与 PATH。其他安装位置可手动配置 `cli`。
+
+Claude Code 会话来自 `claude_home/projects` 下的 JSONL 文件。发送时使用 `claude --resume <session-id> --print`，在后台继续原会话，手机收到的回执以该 JSONL 中的新用户消息和助手消息为准。Claude Code 的图片会放在助手自己的附件目录，并将绝对路径写入任务文本，由 Claude Code 的图片读取能力处理。Claude Desktop 的 `LocalSessions_$_sendMessage` 是内部 Electron IPC，未被外部助手直接调用。
+
+这条适配复用 Claude Code 官方 CLI 的会话恢复能力。Claude Desktop 还有自己的会话索引和窗口状态，当前适配不保证窗口实时显示 CLI 写入的消息。可尝试重新打开同一会话；具体效果取决于桌面版本，不能将 CLI 执行成功视为桌面已同步。
+
+### Claude 使用哪个模型，手机怎么切换
+
+进入 Claude 聊天，点击输入框上方的“发送模型”，选择 Opus、Sonnet、Haiku，或填写服务商支持的完整模型 ID。选择按聊天保存在当前电脑上，下次发送时生效。它与 Claude Desktop 的模型选择分别设置，不会修改电脑 Claude Code 的全局默认模型。
+
+没有保存选择时，优先使用本助手的 `claude_model` 配置，否则沿用会话最近一次回复记录中的模型；没有可用模型记录时必须先选择。每次发送都明确传入 `--model`，不启用自动备用模型参数。重复查询同一条请求保留原请求的模型选择。
+
+发送的消息显示“请求模型”，每条 Claude 回复标注会话记录中的 `message.model`。别名可由 Claude Code 或服务商解析，因此请求名称与回复名称可能不同。通过中转站时，这些名称属于接口报告信息，本助手无法独立核验上游真正运行的模型；响应速度也不能证明模型身份。
 
 `source/peers.json` 仅用于新配置的默认设备列表。修改已运行设备的列表，应编辑数据目录中的 `config.json`。
 
 ## 常见问题
 
+### 双击为什么打开扫码网页，没有电脑聊天窗口
+
+`CodexRelayMobile.exe` / `CodexRelayMobile.app` 是运行在电脑上的手机连接服务，双击打开配对与连接管理页属于正常行为。用手机扫码后，在手机网页中选择聊天并发送任务。
+
+带聊天列表和输入框的独立电脑程序是 `CodexRelay.exe` / `CodexRelay.app`，当前仓库没有发布该程序的源码或安装包。使用手机连接服务不需要另装这个电脑聊天版。
+
 ### 手机打不开页面
 
 检查两台设备的 Tailscale 都在线，手机使用的是该电脑的私网 HTTPS 地址。电脑关机、休眠或助手停止后，手机无法读取最新状态。首次启用 Serve 如出现 Tailscale HTTPS 授权提示，完成后重新启动助手。
+
+### Codex 手机模型选择
+
+在聊天输入框上方点“聊天模型”，选择本机 Codex 提供的模型或填写服务商支持的模型 ID。电脑需要打开目标聊天。保存后通过原生桌面接口只修改下一轮模型，并读回确认；进行中的回复不受影响，推理强度和执行权限保持原设置。
+
+发送前会再次核对聊天模型；如果电脑端已修改，手机会提示重新确认。已排队任务使用执行时的聊天模型，之后在电脑修改模型也会影响它们。这里展示请求模型和桌面设置，无法独立验证中转服务实际使用的后台模型。
 
 ### 消息显示等待接收或等待回执
 

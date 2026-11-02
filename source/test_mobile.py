@@ -40,7 +40,15 @@ class MobileTests(unittest.TestCase):
             self.assertEqual(home, self.home)
             self.calls.append((chat.id, text))
             return {'warning':False,'queue_ids':[],'delivery_mode':'immediate','turn_id':'turn-q'}
-        self.relay = Relay(self.root / 'mobile',self.config,sender,answer_sender=answer_sender)
+        self.model = 'gpt-fixture'
+        self.model_calls = []
+        def model_bridge(chat, home, model=None):
+            self.model_calls.append((chat.id, model))
+            if model is not None:
+                self.model = model
+            return self.model
+        self.relay = Relay(self.root / 'mobile',self.config,sender,answer_sender=answer_sender,
+                           model_bridge=model_bridge, model_catalog=lambda *args: ['gpt-fixture', 'gpt-next'])
         self.server = HTTPServer(self.relay)
         self.port = self.server.server_address[1]
         self.relay.local_origin = f'http://127.0.0.1:{self.port}'
@@ -95,6 +103,110 @@ class MobileTests(unittest.TestCase):
         self.assertEqual(self.request('/api/local/stop',{},extra={'X-Forwarded-For':'100.64.0.2'})[0],403)
         self.assertEqual(self.request('/api/logout',{},cookie=cookie)[0],200)
         self.assertEqual(self.request('/api/chats',cookie=cookie)[0],401)
+
+    def test_mobile_can_switch_provider(self):
+        cookie = self.paired()
+        status, _, raw = self.request('/api/meta', cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)['provider'], 'codex')
+        status, _, raw = self.request('/api/provider', {'provider':'all'}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)['provider'], 'all')
+        status, _, raw = self.request('/api/meta', cookie=cookie)
+        self.assertEqual(json.loads(raw)['provider'], 'all')
+
+    def test_codex_model_catalog_and_confirmed_selection(self):
+        cookie = self.paired()
+        status, _, raw = self.request('/api/codex/models', {'thread_id': 'chat-a'}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)['choices'], ['gpt-fixture', 'gpt-next'])
+        status, _, raw = self.request('/api/codex/model', {'thread_id': 'chat-a', 'model': 'gpt-next'}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)['requested_model'], 'gpt-next')
+        receipt = self.relay.send('chat-a', 'model test', 'model-request-123456', codex_model='gpt-next')
+        self.assertEqual(receipt['requested_model'], 'gpt-next')
+        self.model = 'desktop-changed'
+        # Retrying an accepted request only returns its receipt.
+        self.assertEqual(self.relay.send('chat-a', 'model test', 'model-request-123456', codex_model='gpt-next')['id'], receipt['id'])
+        with self.assertRaisesRegex(DeliveryError, '模型已变化'):
+            self.relay.send('chat-a', 'new message', 'model-request-654321', codex_model='gpt-next')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_codex_model_failure_does_not_claim_success(self):
+        cookie = self.paired()
+        def reject(*args, **kwargs):
+            raise DeliveryError('请打开桌面聊天')
+        self.relay.model_bridge = reject
+        status, _, raw = self.request('/api/codex/model', {'thread_id': 'chat-a', 'model': 'gpt-next'}, cookie=cookie)
+        self.assertEqual(status, 409)
+        self.assertIn('打开桌面', json.loads(raw)['error'])
+        self.assertEqual(self.relay.codex_model_cache, {})
+        self.assertEqual(self.calls, [])
+
+    def claude_session(self, model='claude-opus-fixture'):
+        from claude_backend import ClaudeData
+        project = self.root / 'claude/projects/demo'
+        project.mkdir(parents=True)
+        self.claude_transcript = project / 'session-fixture.jsonl'
+        entries = [{'type':'user','sessionId':'session-fixture','cwd':str(self.root),
+                    'message':{'content':'演示问题'}}]
+        if model:
+            entries.append({'type':'assistant','sessionId':'session-fixture',
+                            'message':{'model':model,'content':'演示回复'}})
+        self.claude_transcript.write_text('\n'.join(json.dumps(item) for item in entries)+'\n',encoding='utf-8')
+        self.relay.claude = ClaudeData(self.root / 'claude')
+        self.relay.set_provider('all')
+        return 'claude:session-fixture'
+
+    def test_claude_model_selection_persists_and_is_pinned_to_delivery(self):
+        identity = self.claude_session()
+        cookie = self.paired()
+        status, _, raw = self.request('/api/chat/'+identity,cookie=cookie)
+        self.assertEqual(status,200)
+        snapshot = json.loads(raw)
+        self.assertEqual(snapshot['claude_model']['requested_model'],'claude-opus-fixture')
+        self.assertEqual(snapshot['messages'][-1]['model'],'claude-opus-fixture')
+        self.assertEqual(self.request('/api/claude/model',{'thread_id':identity,'model':'opus'})[0],401)
+        status, _, raw = self.request('/api/claude/model',{'thread_id':identity,'model':'vendor/opus-custom'},cookie=cookie)
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(raw)['requested_model'],'vendor/opus-custom')
+        stored = json.loads(self.relay.config_path.read_text('utf-8'))
+        self.assertEqual(stored['claude_chat_models'][identity],'vendor/opus-custom')
+        called = []
+        def sender(*args, **kwargs):
+            called.append(kwargs['model'])
+            return {'delivery_mode':'claude-cli'}
+        self.relay.claude_sender = sender
+        body = {'thread_id':identity,'text':'新任务','request_id':'claude-request-12345'}
+        status, _, raw = self.request('/api/send',body,cookie=cookie)
+        self.assertEqual(status,200)
+        self.assertEqual(json.loads(raw)['requested_model'],'vendor/opus-custom')
+        self.relay.set_claude_model(identity,'haiku')
+        status, _, raw = self.request('/api/send',dict(body,claude_model='haiku'),cookie=cookie)
+        self.assertEqual(json.loads(raw)['requested_model'],'vendor/opus-custom')
+        self.assertEqual(called,['vendor/opus-custom'])
+        with self.claude_transcript.open('a',encoding='utf-8') as stream:
+            for item in [{'type':'user','uuid':'new-user','message':{'content':'新任务'}},
+                         {'type':'assistant','message':{'id':'new-answer','model':'provider-reported-model','content':'已处理'}}]:
+                stream.write(json.dumps(item)+'\n')
+        status, _, raw = self.request('/api/chat/'+identity,cookie=cookie)
+        snapshot = json.loads(raw)
+        self.assertEqual(snapshot['messages'][-2]['requested_model'],'vendor/opus-custom')
+        self.assertEqual(snapshot['messages'][-1]['model'],'provider-reported-model')
+        body.update(request_id='claude-request-67890',claude_model='opus')
+        self.request('/api/send',body,cookie=cookie)
+        self.assertEqual(called,['vendor/opus-custom','opus'])
+
+    def test_claude_unknown_model_requires_selection_and_codex_cannot_be_changed(self):
+        identity = self.claude_session(model='')
+        cookie = self.paired()
+        called = []
+        self.relay.claude_sender = lambda *args, **kwargs: called.append(kwargs)
+        body = {'thread_id':identity,'text':'任务','request_id':'unknown-model-1234'}
+        self.assertEqual(self.request('/api/send',body,cookie=cookie)[0],400)
+        self.assertEqual(called,[])
+        self.assertEqual(self.request('/api/claude/model',{'thread_id':identity,'model':'--invalid'},cookie=cookie)[0],400)
+        self.assertEqual(self.request('/api/claude/model',{'thread_id':'chat-a','model':'opus'},cookie=cookie)[0],400)
 
     def test_double_submit_and_restart_never_send_twice(self):
         cookie = self.paired()

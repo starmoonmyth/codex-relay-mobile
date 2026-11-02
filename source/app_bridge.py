@@ -32,7 +32,9 @@ class DesktopClient:
     # Route user input through the desktop thread owner, preserving native turn handling.
     VERSIONS = {'initialize': 0, 'thread-owner-discovery': 1,
                 'thread-follower-steer-turn': 1, 'thread-follower-start-turn': 2,
-                'thread-follower-remove-queued-message': 1}
+                'thread-follower-remove-queued-message': 1,
+                'thread-follower-read-model-settings': 1,
+                'thread-follower-update-thread-settings': 2}
 
     def __init__(self, path):
         if os.name == 'nt':
@@ -153,6 +155,40 @@ def submit_answer(client, request):
     return {'ok': True, 'turn_id': turn_id}
 
 
+def model_settings(client, request):
+    thread_id = request['thread_id']
+    try:
+        owner = client.request('thread-owner-discovery', {'hostId': 'local', 'conversationId': thread_id})
+    except DesktopError as error:
+        raise DesktopError('请在 Codex 桌面中打开这个聊天后再设置模型。') from error
+    owner_id = owner.get('handledByClientId')
+    if not owner_id:
+        raise DesktopError('找不到持有聊天的 Codex 桌面窗口。')
+    params = {'conversationId': thread_id}
+    def read():
+        result = client.request('thread-follower-read-model-settings', params, owner_id)
+        settings = result.get('result', {}).get('settings') or {}
+        if not settings.get('model'):
+            raise DesktopError('桌面未返回聊天模型，请打开目标聊天后重试。')
+        return settings
+    before = read()
+    if request.get('action') == 'set_model':
+        from claude_backend import validate_model
+        model = validate_model(request.get('model'))
+        update = dict(params, threadSettings={'model': model})
+        if 'reasoningEffort' in before:
+            update['condition'] = {'ifModelEquals': before['model'], 'ifEffortEquals': before['reasoningEffort']}
+        reply = client.request('thread-follower-update-thread-settings',
+                               update, owner_id)
+        if not reply.get('result', {}).get('applied'):
+            raise DesktopError('桌面设置已变化或未接受修改，请重新打开模型选择后重试。')
+        after = read()
+        if after['model'] != model:
+            raise DesktopError('桌面读回的模型与选择不一致，请刷新后重新设置。')
+        return {'ok': True, 'model': after['model']}
+    return {'ok': True, 'model': before['model']}
+
+
 def run_helper(request):
     client = None
     for path in endpoints(request.get('home') or default_home()):
@@ -170,18 +206,16 @@ def run_helper(request):
     if client is None:
         raise DesktopError('无法连接 Codex 桌面，请打开桌面应用和这个聊天后重试。本次未发送。')
     try:
-        return submit_answer(client, request)
+        return model_settings(client, request) if request.get('action') in ('read_model', 'set_model') else submit_answer(client, request)
     finally:
         client.close()
 
 
-def deliver_answer(chat, text, request_id, home=None, queue_ids=None):
+def bridge_request(payload):
     command = [sys.executable, '--app-bridge'] if getattr(sys, 'frozen', False) else [sys.executable, str(pathlib.Path(__file__).resolve())]
     with tempfile.TemporaryDirectory(prefix='codex-relay-answer-') as directory:
         source, destination = pathlib.Path(directory) / 'request.json', pathlib.Path(directory) / 'response.json'
-        source.write_text(json.dumps({'thread_id': chat.id, 'cwd': chat.cwd, 'text': text,
-                                      'request_id': request_id, 'home': str(home or default_home()),
-                                      'queue_ids': list(queue_ids or [])}, ensure_ascii=False), 'utf-8')
+        source.write_text(json.dumps(payload, ensure_ascii=False), 'utf-8')
         if os.name != 'nt':
             source.chmod(0o600)
         try:
@@ -195,6 +229,21 @@ def deliver_answer(chat, text, request_id, home=None, queue_ids=None):
         result = json.loads(destination.read_text('utf-8'))
         if not result.get('ok'):
             raise DeliveryError(result.get('error') or '桌面即时回复失败。', bool(result.get('uncertain')))
+    return result
+
+
+def desktop_model(chat, home=None, model=None):
+    try:
+        return bridge_request({'action': 'read_model' if model is None else 'set_model',
+                               'thread_id': chat.id, 'home': str(home or default_home()), 'model': model})['model']
+    except DeliveryError as error:
+        raise DeliveryError('Codex 模型设置未能确认：' + str(error) + ' 请刷新模型设置。本次未发送任务。') from error
+
+
+def deliver_answer(chat, text, request_id, home=None, queue_ids=None):
+    result = bridge_request({'thread_id': chat.id, 'cwd': chat.cwd, 'text': text,
+                             'request_id': request_id, 'home': str(home or default_home()),
+                             'queue_ids': list(queue_ids or [])})
     return {'warning': False, 'queue_ids': [], 'delivery_mode': 'immediate', 'turn_id': result['turn_id']}
 
 

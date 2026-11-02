@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.3.4
+
+- Add Codex model selection to the shared mobile model dialog, using the local Codex model catalog and custom model IDs.
+- Synchronize the original desktop chat's next-turn model through its owner and confirm it by reading settings back.
+- Check the desktop model before submitting a selected-model task and require confirmation if it has changed.
+- Keep existing queued tasks subject to the original chat's execution-time model settings.
+
+## 1.3.3
+
+- Add per-chat Claude model selection on mobile, including custom provider model IDs.
+- Pass an explicit model to every Claude CLI run and preserve it when retrying the same request.
+- Display requested models on sent messages and provider-reported models on Claude replies.
+- Reuse the last recorded response model when no preference is saved; require a selection when no model is known.
+
+## 1.3.2
+
+- Fix Claude Code receipt matching when mobile image attachment instructions are appended to the CLI prompt.
+- Mark completed Claude Code tasks as completed in the mobile view after the assistant response is written to the JSONL transcript.
+
+## 1.3.1
+
+- Add an optional Claude Code provider that reads local JSONL sessions and resumes them with the official CLI.
+- Add a local provider selector for Codex, Claude Code, or both, with namespaced Claude session IDs.
+- Pass uploaded images to Claude Code through a controlled attachment directory and document the Desktop IPC limitation.
+
 ## 1.2.3
 
 - Publish Mac Apple Silicon and Windows desktop packages with a Chinese mobile PWA.

@@ -3,7 +3,7 @@ import socket
 import threading
 import unittest
 
-from app_bridge import DesktopClient, DesktopError, submit_answer
+from app_bridge import DesktopClient, DesktopError, submit_answer, model_settings
 
 
 class BridgeTests(unittest.TestCase):
@@ -143,6 +143,48 @@ class BridgeTests(unittest.TestCase):
             submit_answer(client,dict(self.payload(),queue_ids=['taken-answer']))
         self.assertTrue(caught.exception.uncertain)
         self.assertEqual(self.calls[-1]['method'],'thread-follower-remove-queued-message')
+
+    def model_client(self, applied=True, mismatch=False, effort=True):
+        current = ['gpt-before']
+        def response(request):
+            if request['method'] == 'thread-follower-read-model-settings':
+                settings = {'model': current[0]}
+                if effort:
+                    settings['reasoningEffort'] = 'high'
+                return {'settings': settings}, None
+            if request['method'] == 'thread-follower-update-thread-settings':
+                if applied:
+                    current[0] = 'gpt-other' if mismatch else request['params']['threadSettings']['model']
+                return {'applied': applied}, None
+            return self.response(request)
+        return self.client(response)
+
+    def test_model_update_is_incremental_and_read_back(self):
+        client = self.model_client()
+        result = model_settings(client, {'thread_id': 'fixture-chat', 'action': 'set_model', 'model': 'gpt-next'})
+        self.assertEqual(result, {'ok': True, 'model': 'gpt-next'})
+        update = self.calls[-2]
+        self.assertEqual(update['version'], 2)
+        self.assertEqual(update['params'], {'conversationId': 'fixture-chat', 'threadSettings': {'model': 'gpt-next'},
+                          'condition': {'ifModelEquals': 'gpt-before', 'ifEffortEquals': 'high'}})
+        self.assertEqual(self.calls[-1]['method'], 'thread-follower-read-model-settings')
+
+    def test_model_update_rejection_or_mismatch_is_not_success(self):
+        for arguments in [{'applied': False}, {'mismatch': True}]:
+            with self.subTest(arguments=arguments), self.assertRaises(DesktopError):
+                model_settings(self.model_client(**arguments),
+                               {'thread_id': 'fixture-chat', 'action': 'set_model', 'model': 'gpt-next'})
+
+    def test_model_read_does_not_start_or_steer_a_turn(self):
+        self.assertEqual(model_settings(self.model_client(), {'thread_id': 'fixture-chat', 'action': 'read_model'})['model'], 'gpt-before')
+        self.assertEqual([call['method'] for call in self.calls],
+                         ['initialize', 'thread-owner-discovery', 'thread-follower-read-model-settings'])
+
+    def test_model_update_with_no_reasoning_setting(self):
+        result = model_settings(self.model_client(effort=False),
+                                {'thread_id': 'fixture-chat', 'action': 'set_model', 'model': 'gpt-next'})
+        self.assertEqual(result['model'], 'gpt-next')
+        self.assertNotIn('condition', self.calls[-2]['params'])
 
 
 if __name__ == '__main__':

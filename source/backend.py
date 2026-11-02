@@ -90,6 +90,7 @@ class Chat:
     model: str = ""
     archived: bool = False
     pinned: bool = False
+    provider: str = "codex"
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,7 @@ class Message:
     images: tuple[str, ...] = ()
     questions: tuple[dict, ...] = ()
     client_id: str = ''
+    model: str = ''
 
 
 def user_images(item: dict) -> tuple[str, ...]:
