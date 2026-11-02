@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.7
+
+- Read native Codex, Claude and Grok subscription usage separately from compatible API provider balances and local token totals.
+- Show available quota windows, reset times and credits, with account-scoped caching and Claude rate-limit backoff.
+- Add processing and completed-unread indicators to the chat list; clear unread only when the final reply is visible near the bottom of a foreground chat.
+- Preserve device-local read markers across refreshes and keep transcript reads separate from native conversation writes.
+
 ## 1.3.6
 
 - Add a mobile usage and balance panel for the selected chat, including cumulative tokens, cache reads and the latest model call or Grok task.

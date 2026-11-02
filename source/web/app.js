@@ -12,6 +12,7 @@ function chatStatus(data) {
   }
   const unanswered=data.messages.some(message=>message.questions?.some(question=>question.answer==null));
   if(unanswered&&turn!=='completed'&&turn!=='failed'&&turn!=='interrupted')return 'needs_input';
+  if(data.activity&&['working','queued','needs_input','failed','interrupted'].includes(data.activity.state))return data.activity.state;
   if(turn==='inProgress')return 'working';
   if(turn==='needsInput')return 'needs_input';
   if(turn==='failed')return 'failed';
@@ -55,7 +56,7 @@ function notice(text) { $('send-notice').textContent = text; }
 function connection(text, online) { state.online=online;$('connection').textContent=text;$('connection').classList.toggle('online',online);if(state.chat)drawTurnStatus(!online?'offline':state.lastData?chatStatus(state.lastData):'loading'); }
 async function api(path, body) {
   let response;
-  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),path==='/api/send'||path==='/api/answer'||path.startsWith('/api/codex/model')?90000:15000);
+  const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),path==='/api/send'||path==='/api/answer'||path.startsWith('/api/codex/model')?90000:path.startsWith('/api/usage/')?45000:15000);
   try {response = await fetch(path, {cache:'no-store', credentials:'same-origin',
     signal:controller.signal,
     ...(body ? {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)} : {})});}
@@ -70,17 +71,44 @@ function showLogin() { document.body.classList.remove('chat-layout','keyboard-op
 function drawer(open) { document.body.classList.toggle('drawer',open); $('scrim').hidden=!open; }
 function node(tag, className, text) { const item=document.createElement(tag); if(className)item.className=className; if(text!==undefined)item.textContent=text; return item; }
 function timeLabel(raw) { const date=new Date(raw>1e12?raw:raw*1000),days=Math.floor((Date.now()-date)/86400000); return days===0?'今天':days===1?'昨天':date.toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'}); }
+function unread(chat) {return chat.activity?.state==='completed'&&!!chat.activity.completion_id&&storage.get(key('seen-completion',chat.id))!==chat.activity.completion_id;}
+function seedReadMarkers(chats) {
+  for(const provider of new Set(chats.map(chat=>chat.provider))){
+    const marker='completion-baseline:'+provider;if(storage.get(marker))continue;
+    for(const chat of chats.filter(chat=>chat.provider===provider))if(chat.activity?.completion_id)storage.set(key('seen-completion',chat.id),chat.activity.completion_id);
+    storage.set(marker,'1');
+  }
+}
+function markVisibleCompletion() {
+  const data=state.lastData,box=$('conversation');
+  if(!state.chat||!data||data.chat.id!==state.chat.id||document.hidden||document.body.classList.contains('drawer')||document.querySelector('dialog[open]'))return;
+  if(!data.activity?.visible_completion||box.scrollHeight-box.scrollTop-box.clientHeight>100)return;
+  const marker=key('seen-completion',state.chat.id);
+  if(storage.get(marker)!==data.activity.completion_id){storage.set(marker,data.activity.completion_id);drawList();}
+}
+function listBadge(chat) {
+  const kind=chat.activity?.state,isUnread=unread(chat);
+  const label=isUnread?'完成 · 未查看':({working:'处理中',queued:'排队中',sending:'发送中',needs_input:'待回复',failed:'失败',interrupted:'中断'})[kind];
+  if(!label)return null;
+  const badge=node('span','chat-activity '+(isUnread?'unread':kind));badge.setAttribute('aria-label',isUnread?'已完成，尚未查看':label);
+  const icon=node('span','chat-activity-icon');icon.setAttribute('aria-hidden','true');
+  if(kind==='working'||kind==='sending')icon.innerHTML='<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><circle cx="10" cy="10" r="7" stroke-dasharray="28 16"/></svg>';
+  else icon.textContent=isUnread?'●':kind==='failed'?'!':kind==='needs_input'?'?':'◷';
+  badge.append(icon,document.createTextNode(label));return badge;
+}
 function drawList() {
-  const query=$('search').value.toLowerCase(); const list=$('chat-list'); list.replaceChildren();
+  const query=$('search').value.toLowerCase(); const list=$('chat-list'),top=list.scrollTop; list.replaceChildren();
   const chats=state.chats.filter(c=>(c.title+' '+c.cwd).toLowerCase().includes(query));
   for(const chat of chats) {
     const button=node('button','chat'+(chat.id===state.chat?.id?' active':''));
-    button.append(node('span','chat-name',(chat.pinned?'⌁ ':'')+chat.title));
+    const heading=node('span','chat-heading');heading.append(node('span','chat-name',(chat.pinned?'⌁ ':'')+chat.title));
+    const badge=listBadge(chat);if(badge)heading.append(badge);button.classList.toggle('has-unread',unread(chat));button.append(heading);
     const meta=node('span','chat-meta'); const project=chat.cwd.replaceAll('\\','/').split('/').filter(Boolean).pop()||'未指定项目';
     meta.append(node('span','project',({claude:'Claude · ',grok:'Grok · ',codex:'Codex · '})[chat.provider]+project),node('span','',timeLabel(chat.updated_at)));button.append(meta);
     button.onclick=()=>selectChat(chat); list.append(button);
   }
   if(!chats.length)list.append(node('p','small',state.chats.length?'没有匹配的聊天。':'还没有聊天。请先在电脑的 Codex、Claude Code 或 Grok 中打开一个聊天。'));
+  list.scrollTop=top;
 }
 function imagesFor(id=state.chat?.id) {
   if(!id)return [];
@@ -190,10 +218,12 @@ function markdown(text) {
 }
 function renderSnapshot(data, force) {
   state.lastData=data;
+  const listed=state.chats.find(chat=>chat.id===data.chat.id);if(listed&&data.activity)listed.activity=data.activity;
+  drawList();
   drawModel(data.chat.provider==='grok'?data.grok_model:data.chat.provider==='claude'?data.claude_model:data.codex_model);
   drawTurnStatus(chatStatus(data));
   const box=$('conversation');const near=box.scrollHeight-box.scrollTop-box.clientHeight<100;
-  const signature=JSON.stringify(data);if(signature===state.snapshot)return;
+  const signature=JSON.stringify(data);if(signature===state.snapshot){markVisibleCompletion();return;}
   state.snapshot=signature;
   const fragment=document.createDocumentFragment();
   for(const m of data.messages) {
@@ -217,6 +247,7 @@ function renderSnapshot(data, force) {
   if(!fragment.childNodes.length)fragment.append(node('p','small','还没有消息。在下方输入任务，继续这个聊天。'));
   const oldTop=box.scrollTop;box.replaceChildren(fragment);
   if(near||force){box.scrollTop=box.scrollHeight;$('jump').hidden=true;} else {box.scrollTop=oldTop;$('jump').hidden=false;}
+  markVisibleCompletion();
   const attempt=pending(data.chat.id);
   if(data.receipts.at(-1)?.status==='已完成'&&/已启动.*回复/.test($('send-notice').textContent))notice('任务已完成。');
   if(attempt) {
@@ -245,7 +276,7 @@ async function refreshChat(force=false) {
   catch(error){connection('连接中断',false);notice(error.message+' 请检查电脑和 Tailscale 连接。');}
 }
 async function loadChats() {
-  const data=await api('/api/chats');state.chats=data.chats;state.lastList=Date.now();drawList();
+  const data=await api('/api/chats');seedReadMarkers(data.chats);state.chats=data.chats;state.lastList=Date.now();drawList();
 }
 function drawProviderSelector() {
   const select=$('provider'); if(!select||!state.meta)return;
@@ -280,6 +311,21 @@ function usageTokens(container,title,usage) {
 function drawUsage(data) {
   const content=$('usage-content');content.replaceChildren();
   const local=data.local,balance=data.balance;
+  if(data.plan){
+    const plan=data.plan,section=node('section','usage-section');section.append(node('h3','','套餐用量'+(plan.plan?' · '+plan.plan:'')));
+    if(plan.status==='ok'){
+      for(const item of plan.windows){
+        const row=node('div','usage-window');row.append(node('span','',`${item.label} · 剩余 ${usageNumber(Math.max(0,Math.min(100,100-item.used_percent)))}%`));
+        const progress=document.createElement('progress');progress.max=100;progress.value=Math.min(100,Math.max(0,item.used_percent));progress.setAttribute('aria-label',item.label+'套餐已用比例');row.append(progress);
+        const reset=usageDate(item.resets_at);row.append(node('small','small','已用 '+usageNumber(item.used_percent)+'%'+(reset?' · 重置 '+reset:'')));section.append(row);
+      }
+      if(!plan.windows.length)section.append(node('p','small','接口未提供套餐用量百分比。'));
+      for(const credit of plan.credits)section.append(usageMetric(credit.label,credit.unlimited?'不限额':usageNumber(credit.value),credit.unit));
+    }else section.append(node('p','small',plan.message));
+    if(plan.source)section.append(node('p','small',plan.source));
+    if(plan.updated_at)section.append(node('p','small','查询时间 '+usageDate(plan.updated_at)));
+    section.append(node('p','small','套餐属于原生登录账号，与中转站 API Key 的余额分别计算。'));content.append(section);
+  }
   const account=node('section','usage-section');account.append(node('h3','','服务商余额 / 额度'));
   if(balance.status==='ok'){
     const amount=balance.remaining===-1?'不限额':balance.remaining==null?'接口未提供余额':usageNumber(balance.remaining);
@@ -298,7 +344,7 @@ function drawUsage(data) {
   else session.append(node('h3','','本聊天用量'),node('p','small',local.error||'此聊天尚未记录 Token 用量，完成一次请求后再查看。'));
   if(local.context_window)session.append(node('p','small','模型上下文容量 '+usageNumber(local.context_window)+' Token'));
   if(local.updated_at)session.append(node('p','small','记录时间 '+usageDate(local.updated_at)));
-  if(local.windows.length){
+  if(local.windows.length&&data.plan?.status!=='ok'){
     session.append(node('h3','','账号额度快照'));
     for(const window of local.windows){
       const label=window.minutes?window.minutes>=1440?`${usageNumber(window.minutes/1440)} 天`:`${usageNumber(window.minutes/60)} 小时`:'额度周期';
@@ -404,7 +450,7 @@ $('message').addEventListener('paste',event=>{const files=Array.from(event.clipb
 $('composer').addEventListener('dragover',event=>event.preventDefault());
 $('composer').addEventListener('drop',event=>{event.preventDefault();addImages(Array.from(event.dataTransfer?.files||[]).filter(file=>file.type.startsWith('image/')));});
 $('message').onkeydown=event=>{if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)&&!event.isComposing){event.preventDefault();$('composer').requestSubmit();}};
-$('search').oninput=drawList;$('menu').onclick=()=>drawer(true);$('scrim').onclick=()=>drawer(false);
+$('search').oninput=drawList;$('menu').onclick=()=>drawer(true);$('scrim').onclick=()=>{drawer(false);markVisibleCompletion();};
 $('refresh').onclick=()=>Promise.all([loadChats(),refreshChat(true)]).catch(error=>notice(error.message));
 $('device').onchange=()=>{const url=$('device').value;if(url===state.meta.origin)return;if(state.chat)storage.set(key('draft'),$('message').value);location.assign(url);};
 $('provider').onchange=async()=>{
@@ -421,7 +467,9 @@ $('provider').onchange=async()=>{
 };
 $('logout').onclick=async()=>{await api('/api/logout',{});state.chat=null;showLogin();drawer(false);};
 $('jump').onclick=()=>{$('conversation').scrollTop=$('conversation').scrollHeight;$('jump').hidden=true;};
-$('conversation').onscroll=()=>{const box=$('conversation');if(box.scrollHeight-box.scrollTop-box.clientHeight<100)$('jump').hidden=true;};
+$('conversation').onscroll=()=>{const box=$('conversation');if(box.scrollHeight-box.scrollTop-box.clientHeight<100)$('jump').hidden=true;markVisibleCompletion();};
+for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('close',markVisibleCompletion);
+window.addEventListener('storage',event=>{if(event.key?.startsWith('seen-completion:'))drawList();});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.meta)refreshChat();});
 window.addEventListener('online',()=>{if(state.meta)refreshChat();});
 const viewportState={frame:0,width:0,fullHeight:0};
@@ -448,7 +496,7 @@ document.addEventListener('focusout',()=>setTimeout(updateViewport,100));
 updateViewport();
 setInterval(async()=>{
   if(document.hidden||$('workspace').hidden||state.refreshing)return;
-  state.refreshing=true;try{await refreshChat();if(Date.now()-state.lastList>30000)await loadChats();}catch{}finally{state.refreshing=false;}
+  state.refreshing=true;try{await refreshChat();if(Date.now()-state.lastList>5000)await loadChats();}catch{}finally{state.refreshing=false;}
 },3000);
 (async()=>{
   const fragment=new URLSearchParams(location.hash.slice(1));const token=fragment.get('pair');
@@ -579,7 +627,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.3.6'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.7'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -604,7 +652,7 @@ async function inspectNotificationWorker() {
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.3.6 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.7 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }

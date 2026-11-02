@@ -61,13 +61,27 @@ iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中�
 
 右上角使用文字、图标和颜色共同区分状态：蓝色旋转图标表示处理中，绿色勾选表示已完成，红色错误图标表示失败，黄色分别表示排队、待回复、待确认或中断。新任务等待接收时优先显示队列状态，连接断开会单独显示，避免沿用旧的完成状态。
 
+## 聊天列表状态
+
+列表会显示旋转图标和“处理中”，并区分排队、待回复、失败和中断。任务完成后，尚未查看最终回复的聊天显示蓝绿色圆点和 **完成 · 未查看**。打开聊天并滚动到最终回复后，标记自动清除；停留在历史位置、打开列表或切到后台时不会清除。
+
+已查看记录保存在当前浏览器，刷新和重新打开仍然保留。首次升级时以现有历史作为已查看基线；此后完成的任务会显示未查看。该标记不会修改原生聊天记录，也不与电脑原生应用或其他手机同步。
+
 ## 用量与余额
 
-选择聊天后，点击输入框上方的 **用量与余额**。Codex、Claude Code 和 Grok 显示本聊天累计 Token、缓存读取及最近一次调用的用量；Grok 的最近用量按任务轮次展示。Codex 还会展示聊天记录中已有的账号额度快照及重置时间。缺少用量时显示未提供，过期快照会明确标注。
+选择聊天后，点击输入框上方的 **用量与余额**，可以查看三类数据：
 
-服务商支持 `/v1/usage` 时，可显示钱包余额、API Key 可用额度、周期限额及今日实际扣费。服务端从当前 Codex 配置或 Claude Code 环境设置读取 API Key；Codex 使用登录模式时，也会尝试读取 CC Switch 中服务地址一致的当前配置。此时会明确标注其 API Key 可能与聊天登录账号不同。仅查看 Grok 本地用量，不查询 Grok 订阅余额。
+- **套餐用量**：读取当前原生 CLI 登录账号的周期已用比例、剩余比例和重置时间；接口有提供时展示额外额度或预付余额。Codex 通过 `account/rateLimits/read`，Claude 通过 OAuth usage 接口，Grok 通过 `_x.ai/billing` 查询。缺少接口或原生登录时明确显示不可用。
+- **服务商余额 / 额度**：服务商支持兼容的 `/v1/usage` 时，展示中转站钱包余额、API Key 可用额度、周期限额和今日实际扣费。与原生套餐分别计算。
+- **本聊天用量**：显示 Codex、Claude Code 和 Grok 记录的累计 Token、缓存读取以及最近调用或任务用量；实时套餐不可用时可查看已有额度快照及过期提示。
 
-余额最多每分钟查询一次，API Key 留在电脑上；查询失败不会当作余额为零。Token 统计不是账单，不根据模型价格推算余额。仅提供原生订阅登录、没有兼容余额接口的服务仍可查看本地聊天用量。
+套餐实现参考 [CodexBar](https://github.com/steipete/CodexBar) 的 [Codex](https://github.com/steipete/CodexBar/blob/main/docs/codex.md)、[Claude](https://github.com/steipete/CodexBar/blob/main/docs/claude.md)、[Grok](https://github.com/steipete/CodexBar/blob/main/docs/grok.md) 接口说明，并对照 [CodexBar Windows](https://github.com/Mukund2074/codexbar-windows) 的 OAuth 用量读取方式。它们查询账号套餐接口；本地 Token 统计本身无法得出套餐余额。
+
+原生登录由相应 CLI 管理。Claude 优先读取其配置目录下 `.credentials.json`；Mac 默认目录也支持读取已允许访问的 `Claude Code-credentials` 钥匙串项，查询不会触发钥匙串授权窗口或刷新令牌。自定义 Claude 目录只读取该目录的凭据，不借用默认账号。无法读取时显示未找到可用登录。
+
+中转站 API Key 来自当前 Codex 配置或 Claude Code 环境设置。Codex 使用登录模式时，也会尝试读取 CC Switch 中服务地址一致的当前配置，界面明确提示其 API Key 可能与聊天登录账号不同。
+
+查询结果缓存一分钟；Claude 返回 429 时遵循退避时间。密钥和 OAuth 令牌留在电脑上，手机只接收用量结果。查询失败不会当作余额为零，Token 统计不按模型价格推算套餐余额。
 
 ## 配置与多设备
 
@@ -144,7 +158,7 @@ Codex 桌面应用需保持运行；提问回复需要桌面已打开对应聊�
 
 ## 隐私与安全
 
-配对二维码和链接相当于这台电脑的控制凭证，请只交给自己信任的设备。配对会话有效期为 30 天，可在手机退出配对。程序使用 Tailscale 私网 HTTPS，不配置公网 Funnel，也不读取或复制模型 API 密钥。
+配对二维码和链接相当于这台电脑的控制凭证，请只交给自己信任的设备。配对会话有效期为 30 天，可在手机退出配对。程序使用 Tailscale 私网 HTTPS，不配置公网 Funnel。用量查询只在电脑端读取所需凭据，不向手机传输 API 密钥或 OAuth 令牌。
 
 不要提交本机 `config.json`、`mobile.sqlite`、`pairing-token`、Web Push 私钥、上传图片或聊天历史。安全说明见 [SECURITY.md](SECURITY.md)。
 
