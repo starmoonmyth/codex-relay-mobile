@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 from activity import Activities, transcript_activity
 from backend import Chat, CodexData, Message
+from grok_backend import event_id
 
 
 class ActivityTests(unittest.TestCase):
@@ -53,8 +54,9 @@ class ActivityTests(unittest.TestCase):
             event('agent_message_chunk', 'chunk-b'), event('turn_completed', 'done', prompt_id='prompt', stop_reason='end_turn')])
         value = transcript_activity(chat)
         self.assertEqual(value['state'], 'completed')
-        self.assertEqual(value['message_id'], 'chunk-a')
-        self.assertTrue(self.activities.visible(value, [Message('chunk-a', 'assistant', 'Done')])['visible_completion'])
+        identity = event_id(event('agent_message_chunk', 'chunk-a'))
+        self.assertEqual(value['message_id'], identity)
+        self.assertTrue(self.activities.visible(value, [Message(identity, 'assistant', 'Done')])['visible_completion'])
 
     def test_native_latest_turn_and_queue_have_distinct_states(self):
         with contextlib.closing(sqlite3.connect(self.root / 'thread_history_1.sqlite')) as c, c:

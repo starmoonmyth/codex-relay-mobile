@@ -29,11 +29,13 @@
 
 Claude Code 会话来自 `claude_home/projects` 下的 JSONL 文件。发送时使用 `claude --resume <session-id> --print`，在后台继续原会话，手机收到的回执以该 JSONL 中的新用户消息和助手消息为准。Claude Code 的图片会放在助手自己的附件目录，并将绝对路径写入任务文本，由 Claude Code 的图片读取能力处理。Claude Desktop 的 `LocalSessions_$_sendMessage` 是内部 Electron IPC，未被外部助手直接调用。
 
-这条适配复用 Claude Code 官方 CLI 的会话恢复能力。Claude Desktop 还有自己的会话索引和窗口状态，当前适配不保证窗口实时显示 CLI 写入的消息。可尝试重新打开同一会话；具体效果取决于桌面版本，不能将 CLI 执行成功视为桌面已同步。
+可写适配复用 Claude Code CLI 的会话恢复能力。Claude Desktop 有自己的会话索引、分支、连接器和窗口状态；识别出的桌面会话在手机只读，禁止转交普通 CLI 另起分支。桌面历史读取仍可能为空或不完整，见 [KI-002](../KNOWN_ISSUES.md#待修复)。不要将 CLI 执行成功视为桌面已同步，也不要因手机未显示内容重复发送。
 
 ### Claude 使用哪个模型，手机怎么切换
 
-进入 Claude 聊天，点击输入框上方的“发送模型”，选择 Opus、Sonnet、Haiku，或填写服务商支持的完整模型 ID。选择按聊天保存在当前电脑上，下次发送时生效。它与 Claude Desktop 的模型选择分别设置，不会修改电脑 Claude Code 的全局默认模型。
+进入可写的 Claude CLI 聊天，点击输入框上方的“发送模型”，选择 Opus、Sonnet、Haiku，或填写服务商支持的完整模型 ID。选择按聊天保存在当前电脑上，下次发送时生效，不会修改电脑 Claude Code 的全局默认模型。
+
+Claude Desktop 聊天是只读的：同一个模型入口仅记录助手偏好，不会同步修改桌面模型，也不代表能够从手机发送。桌面模型请在 Claude Desktop 中设置。
 
 没有保存选择时，优先使用本助手的 `claude_model` 配置，否则沿用会话最近一次回复记录中的模型；没有可用模型记录时必须先选择。每次发送都明确传入 `--model`，不启用自动备用模型参数。重复查询同一条请求保留原请求的模型选择。
 
@@ -46,6 +48,8 @@ Claude Code 会话来自 `claude_home/projects` 下的 JSONL 文件。发送时�
 `grok_cli` 可指定 CLI 路径，`grok_home` 可指定会话目录，默认 `GROK_HOME` 或 `~/.grok`。`grok_model` 是此助手的默认模型，`grok_chat_models` 保存各聊天的选择。可选 `grok_permission_mode` 显式传给 Grok；省略时沿用 Grok 的本机权限设置。
 
 此适配只读取 Grok 的会话记录和模型名称，任务交给官方 CLI，不复制登录凭证，也不改写 Grok 聊天文件。后台执行使用独立监督进程记录 CLI 的退出结果，服务停止后已经提交的 Grok 任务仍可继续。图片和手机工具审批尚未开放。
+
+Grok Bot 桌面聊天从独立本地缓存读取，标为只读，不会转交给 Grok CLI。Grok 已停止任务仍可能显示处理中，见 [KI-001](../KNOWN_ISSUES.md#待修复)；以桌面实际状态为准。
 
 ## 常见问题
 

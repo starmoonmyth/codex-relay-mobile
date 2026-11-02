@@ -6,7 +6,8 @@ import pathlib
 import sqlite3
 import threading
 
-from claude_backend import ClaudeData
+from claude_backend import ClaudeData, claude_branch
+from grok_backend import event_id, event_time, run_status
 
 
 STATES = {'inProgress': 'working', 'needsInput': 'needs_input', 'completed': 'completed',
@@ -20,23 +21,31 @@ def completed(identity, message_id=''):
 
 def transcript_activity(chat):
     activity = {'state': 'idle', 'completion_id': ''}
+    if chat.source == 'grok-bot':
+        return activity
     last_agent, group = '', None
-    for index, entry in enumerate(ClaudeData._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024)):
+    entries = claude_branch(chat) if chat.provider == 'claude' else ClaudeData._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024)
+    for index, entry in enumerate(entries):
         if chat.provider == 'claude':
             if entry.get('isSidechain'):
                 continue
             message = entry.get('message') or {}
+            content = message.get('content')
+            text = content if isinstance(content, str) else ''.join(
+                part.get('text', '') for part in content or []
+                if isinstance(part, dict) and part.get('type') == 'text')
             if entry.get('type') == 'user':
-                activity = {'state': 'working', 'completion_id': ''}
+                if entry.get('toolUseResult') or '[Request interrupted by user' in text:
+                    activity = {'state': 'interrupted', 'completion_id': ''}
+                else:
+                    activity = {'state': 'working', 'completion_id': ''}
             elif entry.get('type') == 'assistant':
                 activity = {'state': 'working', 'completion_id': ''}
                 if entry.get('isApiErrorMessage'):
                     activity['state'] = 'failed'
                 elif message.get('stop_reason') in ('end_turn', 'stop_sequence'):
-                    content = message.get('content')
-                    text = content if isinstance(content, str) else ''.join(part.get('text', '') for part in content or [] if isinstance(part, dict) and part.get('type') == 'text')
                     if text.strip():
-                        identity = message.get('id') or entry.get('uuid') or str(index)
+                        identity = entry.get('uuid') or message.get('id') or str(index)
                         activity = completed(identity, identity)
                 elif message.get('stop_reason') == 'max_tokens':
                     activity['state'] = 'interrupted'
@@ -45,19 +54,22 @@ def transcript_activity(chat):
             update, meta = params.get('update') or {}, params.get('_meta') or {}
             kind = update.get('sessionUpdate')
             if kind == 'user_message_chunk':
-                activity = {'state': 'working', 'completion_id': ''}
+                activity = {'state': 'working', 'completion_id': '', 'user_timestamp_ms': event_time(entry),
+                    'user_message_id': event_id(entry, index)}
                 group, last_agent = None, ''
             elif kind == 'agent_message_chunk':
                 next_group = (meta.get('promptId'), meta.get('streamStartMs'))
                 if next_group != group or not last_agent:
-                    last_agent = str(meta.get('eventId') or '')
+                    last_agent = event_id(entry, index)
                 group = next_group
             elif kind == 'turn_completed':
                 reason = str(update.get('stop_reason', '')).lower()
                 if reason in ('end_turn', 'endturn'):
-                    activity = completed(update.get('prompt_id') or meta.get('eventId') or last_agent or str(index), last_agent)
+                    activity.update(completed(update.get('prompt_id') or event_id(entry, index), last_agent))
                 else:
-                    activity = {'state': 'interrupted' if 'cancel' in reason else 'failed', 'completion_id': ''}
+                    activity.update(state='interrupted' if 'cancel' in reason else 'failed', completion_id='')
+            else:
+                group = None
     return activity
 
 
@@ -69,7 +81,7 @@ class Activities:
     def transcript(self, chat):
         try:
             stat = pathlib.Path(chat.rollout_path).stat()
-            signature = (chat.rollout_path, stat.st_mtime_ns, stat.st_size)
+            signature = (chat.rollout_path, chat.history_head, chat.source, stat.st_mtime_ns, stat.st_size)
         except OSError:
             return {'state': 'idle', 'completion_id': ''}
         with self.lock:
@@ -122,17 +134,21 @@ class Activities:
             if row['thread_id'] not in result:
                 continue
             receipt = json.loads(row['receipt'])
+            chat = next(chat for chat in chats if chat.id == row['thread_id'])
+            if not chat.writable or receipt.get('detached'):
+                continue
             value = result[row['thread_id']]
             if receipt.get('status') == '正在投递':
                 result[row['thread_id']] = {'state': 'sending', 'completion_id': ''}
             elif receipt.get('provider') == 'grok' and receipt.get('result') == 'sent':
-                path = relay.root / 'grok-runs' / row['id'] / 'result.json'
-                try:
-                    finished = json.loads(path.read_text('utf-8'))
-                except (OSError, ValueError):
-                    finished = None
+                finished = run_status(relay.root / 'grok-runs' / row['id'], row['thread_id'].split(':', 1)[1])
+                native_received = (bool(value.get('user_message_id') and value['user_message_id'] == receipt.get('message_id')) or
+                    bool(receipt.get('sent_at_ms') and value.get('user_timestamp_ms', 0) >= receipt['sent_at_ms']))
                 if finished is None:
-                    result[row['thread_id']] = {'state': 'working', 'completion_id': ''}
+                    if not native_received:
+                        result[row['thread_id']] = {'state': 'working', 'completion_id': ''}
+                elif finished.get('ok') and not native_received:
+                    result[row['thread_id']] = completed(receipt['id'])
                 elif not finished.get('ok') and value['state'] == 'working':
                     result[row['thread_id']] = {'state': 'failed', 'completion_id': ''}
         return result

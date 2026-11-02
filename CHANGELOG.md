@@ -1,5 +1,20 @@
 # Changelog
 
+本日志按公开版本组织。一次公开更新可包含多轮本地改动，不补发中间调试编号。发布流程见 [版本与发布规则](docs/releasing.md)。
+
+## 1.3.8-rc.1 · 预览版 · 2026-11-03
+
+相对公开版 1.3.7 的累计更新，尚未达到稳定发布条件，1.3.7 保留为默认稳定下载。
+
+- 为手机投递绑定工作台、记录来源、文件路径和消息头；过期目标拒绝投递，旧分支回执单独展示。
+- 区分 Claude Desktop、Claude Code CLI、Grok Bot 桌面和 Grok CLI。识别出的桌面记录只读，避免经 CLI 写入另一套会话。
+- 加入 Claude 消息父链和叶节点读取，以及部分中断信号识别；这些改动仍有历史加载回归，不能视为已完成适配。
+- 改进 Grok CLI 回执关联和结束结果读取；停止任务的状态仍可能误报。
+- 保留可写 CLI 聊天的模型选择；Claude Desktop 模型入口仅保存助手偏好，不同步桌面设置。
+- 新增已知问题清单、接入边界与独立的公开版本发布规则。
+
+**未修复：** [KI-001](KNOWN_ISSUES.md#待修复)（Grok 停止后仍可能显示处理中）、[KI-002](KNOWN_ISSUES.md#待修复)（Claude Desktop 正文可能为空或不完整）。本候选版不包含对这两项最新反馈的修复。
+
 ## 1.3.7
 
 - Read native Codex, Claude and Grok subscription usage separately from compatible API provider balances and local token totals.

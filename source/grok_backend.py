@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import pathlib
@@ -12,6 +13,7 @@ import tomllib
 
 from backend import Chat, DeliveryError, Message
 from claude_backend import ClaudeData, validate_model
+from desktop_records import GrokBotRecords
 
 
 def default_grok_home():
@@ -38,13 +40,39 @@ def read_json(path, fallback=None):
         return fallback
 
 
+def event_time(entry):
+    meta = (entry.get('params') or {}).get('_meta') or {}
+    return int(meta.get('agentTimestampMs') or (entry.get('timestamp') or 0) * 1000)
+
+
+def event_id(entry, index=0):
+    meta = (entry.get('params') or {}).get('_meta') or {}
+    # Grok restarts event counters when a CLI resumes the same session.
+    identity = [meta.get('eventId'), meta.get('promptId'), event_time(entry)]
+    if not any(identity):
+        identity.append(index)
+    return 'grok-message:' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:32]
+
+
+def run_status(directory, session_id):
+    result = read_json(directory / 'result.json')
+    if isinstance(result, dict) and isinstance(result.get('ok'), bool):
+        return result
+    output = read_json(directory / 'output.json', {})
+    if (isinstance(output, dict) and output.get('sessionId') == session_id and
+            str(output.get('stopReason', '')).lower() in ('endturn', 'end_turn')):
+        return {'ok': True, 'session_confirmed': True, 'prompt_id': output.get('requestId')}
+    return None
+
+
 class GrokData(ClaudeData):
-    def __init__(self, home=None):
+    def __init__(self, home=None, bot_root=None):
         self.home = pathlib.Path(home or default_grok_home())
         self.projects = self.home / 'sessions'
+        self.bot = GrokBotRecords(bot_root) if bot_root is not None or self.home == default_grok_home() else None
 
     def has_sessions(self):
-        return next(self.projects.glob('*/*/summary.json'), None) is not None
+        return next(self.projects.glob('*/*/summary.json'), None) is not None or bool(self.bot and self.bot.chats())
 
     def model_choices(self):
         cache = read_json(self.home / 'models_cache.json', {})
@@ -67,6 +95,8 @@ class GrokData(ClaudeData):
             identity, cwd = info.get('id') or path.parent.name, info.get('cwd')
             if not re.fullmatch(r'[a-fA-F0-9-]{36}', identity) or not isinstance(cwd, str) or not cwd:
                 continue
+            if identity != path.parent.name:
+                continue
             title = item.get('generated_title') or item.get('session_summary') or 'Grok 聊天'
             updated = path.stat().st_mtime
             try:
@@ -75,10 +105,18 @@ class GrokData(ClaudeData):
                 pass
             chats.append(Chat('grok:' + identity, ' '.join(str(title).split())[:180], cwd,
                               str(path.parent / 'updates.jsonl'), int(updated),
-                              model=item.get('current_model_id') or '', provider='grok'))
+                              model=item.get('current_model_id') or '', provider='grok', source='grok-cli'))
+        counts = {}
+        for chat in chats:
+            counts[chat.id] = counts.get(chat.id, 0) + 1
+        chats = [chat for chat in chats if counts[chat.id] == 1]
+        if self.bot:
+            chats.extend(self.bot.chats())
         return sorted(chats, key=lambda chat: chat.updated_at, reverse=True)
 
     def history(self, chat, limit=60):
+        if chat.source == 'grok-bot':
+            return self.bot.history(chat, limit) if self.bot else []
         messages, current, model = [], None, ''
         for index, entry in enumerate(self._read(pathlib.Path(chat.rollout_path), max_bytes=4 * 1024 * 1024)):
             params = entry.get('params') or {}
@@ -94,28 +132,48 @@ class GrokData(ClaudeData):
             if role == 'user':
                 model = (update.get('_meta') or {}).get('modelId') or model
             text = content['text']
-            event = str(meta.get('eventId') or f"{entry.get('timestamp', 0)}:{index}")
+            event = event_id(entry, index)
             group = (role, meta.get('promptId'), meta.get('streamStartMs'))
             if role == 'assistant' and current and current[0] == group:
                 old = messages[-1]
-                messages[-1] = Message(old.id, role, old.text + text, ordinal=old.ordinal, model=old.model)
+                messages[-1] = Message(old.id, role, old.text + text, ordinal=old.ordinal, model=old.model, timestamp_ms=old.timestamp_ms)
             else:
-                messages.append(Message(event, role, text, ordinal=index, model=model if role == 'assistant' else ''))
+                messages.append(Message(event, role, text, ordinal=index, model=model if role == 'assistant' else '', timestamp_ms=event_time(entry)))
             current = (group, event)
-        return messages[-limit:]
+        return messages[-limit:] if limit else messages
+
+    @staticmethod
+    def receipt_message(receipt, messages):
+        baseline = set(receipt.get('baseline_ids', []))
+        sent = receipt.get('sent_at_ms') or 0
+        for message in messages:
+            if message.role != 'user' or message.id in baseline:
+                continue
+            if sent and message.timestamp_ms and message.timestamp_ms < sent:
+                continue
+            if message.text.rstrip('\r\n') == str(receipt.get('text', '')).rstrip('\r\n'):
+                if not receipt.get('message_id') or not receipt['message_id'].startswith('grok-message:') or message.id == receipt['message_id']:
+                    return message
+        return None
+
+    def historical_receipt_message(self, receipt):
+        chat = next((chat for chat in self.chats() if chat.id == receipt['thread_id']), None)
+        return self.receipt_message(receipt, self.history(chat, limit=0)) if chat else None
 
     def turn(self, thread_id, turn_id=''):
         chat = next((chat for chat in self.chats() if chat.id == thread_id), None)
         if not chat:
             return {}
+        if chat.source == 'grok-bot':
+            return {}
         status, identity = '', ''
-        for entry in self._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024):
+        for index, entry in enumerate(self._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024)):
             params = entry.get('params') or {}
             update = params.get('update') or {}
             kind = update.get('sessionUpdate')
             if kind == 'user_message_chunk':
                 status = 'inProgress'
-                identity = (params.get('_meta') or {}).get('eventId') or str(entry.get('timestamp', ''))
+                identity = event_id(entry, index)
             elif kind == 'turn_completed':
                 reason = str(update.get('stop_reason', '')).lower()
                 status = 'completed' if reason in ('end_turn', 'endturn') else 'interrupted' if 'cancel' in reason else 'failed'
@@ -137,8 +195,22 @@ class GrokData(ClaudeData):
         return '处理中' if self.receipt_message(receipt, messages) else receipt.get('status', '等待接收')
 
 
+def validate_target(home, chat):
+    path = pathlib.Path(chat.rollout_path).resolve()
+    projects = pathlib.Path(home).resolve() / 'sessions'
+    session = chat.id.split(':', 1)[1]
+    summary = read_json(path.with_name('summary.json'), {})
+    info = summary.get('info') or {}
+    if (not path.is_relative_to(projects) or path.parent.name != session or info.get('id') != session or
+            pathlib.Path(info.get('cwd') or '').resolve() != pathlib.Path(chat.cwd).resolve()):
+        raise ValueError('Grok 会话的来源、编号或项目已变化，请刷新聊天。本次未发送。')
+
+
 def deliver_grok(cli, home, chat, text, request_id, run_dir, model, permission_mode=''):
     validate_model(model)
+    if not chat.writable or chat.source == 'grok-bot' or not chat.id.startswith('grok:'):
+        raise ValueError('这是 Grok Bot 桌面聊天，请在 Grok Bot 中发送。不会转交给另一个 CLI 会话。')
+    validate_target(home, chat)
     if not isinstance(request_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{16,100}', request_id):
         raise ValueError('消息编号无效。')
     if not cli or not pathlib.Path(cli).is_file():
@@ -152,7 +224,7 @@ def deliver_grok(cli, home, chat, text, request_id, run_dir, model, permission_m
     prompt = directory / 'prompt.txt'
     prompt.write_text(text, 'utf-8')
     payload = {'cli': cli, 'home': str(home), 'cwd': chat.cwd, 'session_id': chat.id.split(':', 1)[1],
-               'model': model, 'permission_mode': permission_mode}
+               'model': model, 'permission_mode': permission_mode, 'transcript': chat.rollout_path}
     request = directory / 'request.json'
     request.write_text(json.dumps(payload), 'utf-8')
     command = [sys.executable, '--grok-run'] if getattr(sys, 'frozen', False) else [sys.executable, str(pathlib.Path(__file__).resolve())]
@@ -174,6 +246,9 @@ def run_cli(request):
     if data.get('permission_mode'):
         command += ['--permission-mode', data['permission_mode']]
     try:
+        if data.get('transcript'):
+            chat = Chat('grok:' + data['session_id'], '', data['cwd'], data['transcript'], 0, provider='grok')
+            validate_target(data['home'], chat)
         with (directory / 'output.json').open('w', encoding='utf-8') as output, (directory / 'stderr.log').open('w', encoding='utf-8') as error:
             result = subprocess.run(command, cwd=data['cwd'], env=dict(os.environ, GROK_HOME=data['home']),
                                     stdin=subprocess.DEVNULL, stdout=output, stderr=error,

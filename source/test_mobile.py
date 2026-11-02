@@ -221,6 +221,52 @@ class MobileTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '图片投递'):
             self.relay.send(identity, 'image task', 'grok-fixture-request-04', [image['id']])
 
+    def test_grok_recovers_native_completion_and_legacy_receipts_after_resuming(self):
+        from test_grok_backend import update, SESSION
+        identity, directory = self.grok_session()
+        self.relay.grok_sender = lambda *args: {'delivery_mode': 'grok-cli'}
+        path = directory / 'updates.jsonl'
+        entries = []
+        def append_turn(milliseconds, done=True):
+            user = update('user_message_chunk', 'same task', 'counter-4')
+            user['params']['_meta'] = {'eventId': 'counter-4', 'agentTimestampMs': milliseconds}
+            entries.append(user)
+            if done:
+                reply = update('agent_message_chunk', 'Done', 'counter-8')
+                reply['params']['_meta'].update(agentTimestampMs=milliseconds + 1, promptId=str(milliseconds))
+                entries.extend([reply, update('turn_completed', prompt_id=str(milliseconds), stop_reason='end_turn')])
+            path.write_text('\n'.join(json.dumps(entry) for entry in entries) + '\n')
+        append_turn(1000)
+        receipt = self.relay.send(identity, 'same task', 'grok-recovery-request-01')
+        self.assertEqual(self.relay.snapshot(identity)['activity']['state'], 'working')
+        append_turn(receipt['sent_at_ms'] + 100)
+        with self.relay.connect() as connection:
+            receipt.update(baseline_ids=['counter-4'], message_id='counter-4')
+            self.relay.save_receipt(connection, receipt)
+        snapshot = self.relay.snapshot(identity)
+        self.assertTrue(snapshot['receipts'][-1]['seen_in_history'])
+        self.assertTrue(snapshot['receipts'][-1]['grok_finished'])
+        self.assertEqual(snapshot['receipts'][-1]['status'], '已完成')
+        self.assertEqual(snapshot['activity']['state'], 'completed')
+        self.assertTrue(snapshot['activity']['visible_completion'])
+        cookie = self.paired()
+        listed = json.loads(self.request('/api/chats', cookie=cookie)[2])['chats']
+        self.assertEqual(next(chat['activity']['state'] for chat in listed if chat['id'] == identity), 'completed')
+        self.assertEqual(self.relay.send(identity, 'new task', 'grok-recovery-request-02')['result'], 'sent')
+
+    def test_grok_completed_cli_output_is_a_receipt_without_supervisor_result(self):
+        from test_grok_backend import SESSION
+        identity, _ = self.grok_session()
+        self.relay.grok_sender = lambda *args: {'delivery_mode': 'grok-cli'}
+        receipt = self.relay.send(identity, 'task', 'grok-output-request-001')
+        run = self.relay.root / 'grok-runs' / receipt['id']
+        run.mkdir(parents=True)
+        (run / 'output.json').write_text(json.dumps({'sessionId': SESSION, 'stopReason': 'EndTurn'}))
+        snapshot = self.relay.snapshot(identity)
+        self.assertTrue(snapshot['receipts'][-1]['grok_finished'])
+        self.assertEqual(snapshot['activity']['state'], 'completed')
+        self.assertEqual(self.relay.send(identity, 'next', 'grok-output-request-002')['result'], 'sent')
+
     def test_claude_model_selection_persists_and_is_pinned_to_delivery(self):
         identity = self.claude_session()
         cookie = self.paired()

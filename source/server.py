@@ -26,7 +26,7 @@ from image_delivery import deliver_images
 from notifications import Notifications, question_answers
 from app_bridge import deliver_answer, desktop_model
 from codex_models import list_models
-from grok_backend import GrokData, default_grok_home, discover_grok_cli, deliver_grok, read_json
+from grok_backend import GrokData, default_grok_home, discover_grok_cli, deliver_grok, read_json, run_status
 from usage import Usage
 from activity import Activities
 from plan_usage import Plans
@@ -163,6 +163,22 @@ class Relay:
 
     def data_for(self, chat):
         return self.grok if chat.provider == 'grok' else self.claude if chat.provider == "claude" else self.data
+
+    @staticmethod
+    def record_key(chat):
+        source = [chat.provider, chat.source, chat.id, os.path.normcase(str(pathlib.Path(chat.rollout_path).resolve()))]
+        return hashlib.sha256(json.dumps(source).encode()).hexdigest()
+
+    def conversation_info(self, chat):
+        labels = {'claude-desktop': 'Claude 桌面 · 当前分支', 'claude-cli': 'Claude Code CLI',
+                  'grok-bot': 'Grok Bot 桌面 · 本地缓存', 'grok-cli': 'Grok CLI'}
+        detail = ''
+        if chat.source == 'claude-desktop':
+            detail = '按 Claude 桌面选中的消息链显示。请在 Claude 桌面发送；手机不会另起 CLI 写入其他分支。'
+        elif chat.source == 'grok-bot':
+            detail = '显示 Grok Bot 保存到此电脑的聊天缓存，可能只包含最近部分记录。请在 Grok Bot 中发送。'
+        return {'source': chat.source, 'label': labels.get(chat.source, 'Codex'), 'writable': chat.writable,
+                'detail': detail, 'record_key': self.record_key(chat), 'history_head': chat.history_head}
 
     def set_provider(self, provider):
         if provider not in ("codex", "claude", "grok", "all"):
@@ -353,7 +369,8 @@ class Relay:
     def image_path(self, image):
         return self.root / "uploads" / (image["id"] + IMAGE_SUFFIX[image["mime"]])
 
-    def send(self, identity, text, request_id, image_ids=None, immediate=False, claude_model=None, codex_model=None, grok_model=None):
+    def send(self, identity, text, request_id, image_ids=None, immediate=False, claude_model=None, codex_model=None, grok_model=None,
+             record_key=None, history_head=None):
         image_ids = [] if image_ids is None else image_ids
         if not isinstance(image_ids, list) or any(not isinstance(item, str) for item in image_ids):
             raise ValueError("图片列表无效。")
@@ -380,6 +397,12 @@ class Relay:
             chat = self.chat(identity)
             if chat is None:
                 raise ValueError("聊天不存在或已归档，请重新选择。")
+            if not chat.writable:
+                raise ValueError(self.conversation_info(chat)['detail'])
+            if record_key is not None and record_key != self.record_key(chat):
+                raise ValueError('聊天记录来源已变化，请重新选择聊天。本次未发送。')
+            if chat.provider == 'claude' and history_head is not None and history_head != chat.history_head:
+                raise ValueError('聊天消息链已更新，请刷新后发送。本次未发送。')
             data = self.data_for(chat)
             images = [self.image(item) for item in image_ids]
             if chat.provider == 'grok':
@@ -389,8 +412,13 @@ class Relay:
                     raise ValueError('这个 Grok 聊天正在执行任务，请完成后再发送。')
                 with self.connect() as connection:
                     previous = connection.execute('SELECT id,receipt FROM deliveries WHERE thread_id=? ORDER BY rowid DESC LIMIT 1', (identity,)).fetchone()
-                if previous and json.loads(previous['receipt']).get('result') == 'sent' and not (self.root / 'grok-runs' / previous['id'] / 'result.json').is_file():
-                    raise ValueError('上一条 Grok 任务尚未结束，请先查看原聊天。本次未发送。')
+                if previous and json.loads(previous['receipt']).get('result') == 'sent':
+                    old = json.loads(previous['receipt'])
+                    activity = self.activities.transcript(chat)
+                    native_finished = (activity['state'] in ('completed', 'failed', 'interrupted') and
+                        old.get('sent_at_ms') and activity.get('user_timestamp_ms', 0) >= old['sent_at_ms'])
+                    if not native_finished and not run_status(self.root / 'grok-runs' / previous['id'], identity.split(':', 1)[1]):
+                        raise ValueError('上一条 Grok 任务尚未结束，请先查看原聊天。本次未发送。')
             if sum(image['size'] for image in images) > MAX_ATTACHMENT_BYTES:
                 raise ValueError('每条消息的图片总大小最多 32 MB，请移除部分图片后发送。')
             messages = data.history(chat)
@@ -399,6 +427,8 @@ class Relay:
             receipt["id"] = request_id
             receipt["images"] = images
             receipt["provider"] = chat.provider
+            receipt['record_key'] = self.record_key(chat)
+            receipt['history_head'] = chat.history_head
             if chat.provider == 'grok':
                 receipt['requested_model'] = validate_model(self.grok_model_info(chat)['requested_model'] if grok_model is None else grok_model)
             elif chat.provider == "claude":
@@ -427,7 +457,7 @@ class Relay:
                     result = self.claude_sender(
                         self.claude_cli, chat, text, [self.image_path(image) for image in images],
                         request_id, self.config.get("claude_permission_mode", "bypassPermissions"),
-                        self.root / "claude-runs", model=receipt["requested_model"])
+                        self.root / "claude-runs", model=receipt["requested_model"], home=self.claude.home)
                 else:
                     result = (self.answer_sender(chat,text,request_id,self.data.home,retry_queue_ids) if immediate else self.image_sender(self.cli, self.data.home, chat, text,
                               [self.image_path(image) for image in images], request_id) if images
@@ -502,20 +532,32 @@ class Relay:
                 "SELECT receipt FROM deliveries WHERE thread_id=? ORDER BY created DESC, rowid DESC LIMIT 30", (identity,))]
             for receipt in receipts:
                 if chat.provider == 'grok' and receipt.get('result') == 'sent':
-                    finished = read_json(self.root / 'grok-runs' / receipt['id'] / 'result.json')
+                    finished = run_status(self.root / 'grok-runs' / receipt['id'], identity.split(':', 1)[1])
                     if finished:
                         if finished.get('ok'):
                             receipt['grok_finished'] = True
                         else:
                             receipt.update(result='failed', status='执行失败', error=finished.get('error', 'Grok 执行失败。'))
                 match = data.receipt_message(receipt, messages)
+                if receipt.get('record_key') and receipt['record_key'] != self.record_key(chat):
+                    match = None
+                    receipt['detached'] = True
                 if not match and receipt.get('result') == 'sent' and not set(receipt.get('queue_ids', [])) & queue_ids:
-                    match = data.historical_receipt_message(receipt)
+                    if not receipt.get('detached'):
+                        match = data.historical_receipt_message(receipt)
+                if chat.source == 'claude-desktop' and not match:
+                    receipt['detached'] = True
+                    receipt['status'] = '不在桌面当前分支'
+                    receipt['seen_in_history'] = False
                 if match:
                     receipt["seen_in_history"] = True
                     receipt['message_id'] = match.id
                     receipt['turn_id'] = match.turn_id
-                if receipt["status"] != "正在投递":
+                    if chat.provider == 'grok':
+                        activity = self.activities.transcript(chat)
+                        if activity.get('user_message_id') == match.id and activity['state'] == 'completed':
+                            receipt['grok_finished'] = True
+                if not receipt.get('detached') and receipt["status"] != "正在投递":
                     receipt["status"] = data.receipt_status(receipt, messages, queue_ids)
                 self.save_receipt(connection, receipt)
         output = []
@@ -529,7 +571,7 @@ class Relay:
                 answer_status.update({key: 'received' for key in actual})
         for receipt in receipts:
             receipt['display_text'] = display_user_text(receipt['text'])
-            if receipt.get('result') != 'failed':
+            if not receipt.get('detached') and receipt.get('result') != 'failed':
                 for key, answer in question_answers(receipt['text']).items():
                     answers.setdefault(key, answer)
                     if receipt.get('delivery_mode') == 'immediate' and receipt.get('result') == 'sent':
@@ -543,6 +585,8 @@ class Relay:
         uploaded = {}
         requested_models = {}
         for receipt in receipts:
+            if receipt.get('detached'):
+                continue
             match = data.receipt_message(receipt, messages)
             if match and receipt.get("images"):
                 uploaded[match.id] = receipt["images"]
@@ -563,6 +607,7 @@ class Relay:
                 output.append(item)
         activity = self.activities.visible(self.activities.read(self, [chat])[chat.id], messages)
         return {"chat": dataclasses.asdict(chat), "messages": output, 'activity': activity,
+                'conversation': self.conversation_info(chat),
                 "claude_model": self.claude_model_info(chat) if chat.provider == "claude" else None,
                 "codex_model": self.codex_model_info(chat) if chat.provider == 'codex' else None,
                 'grok_model': self.grok_model_info(chat, messages) if chat.provider == 'grok' else None,
@@ -664,7 +709,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.notifications.acknowledge(body.get('token'),body.get('stage'),body.get('error','')))
                     return
             if path == "/api/health" and not post:
-                self.response({"app": "CodexRelayMobile", "version": "1.3.7", "label": self.relay.config.get("label", socket.gethostname())})
+                self.response({"app": "CodexRelayMobile", "version": "1.3.8-rc.1", "label": self.relay.config.get("label", socket.gethostname())})
                 return
             if path.startswith("/api/local/"):
                 if not self.local() or post:
@@ -749,7 +794,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(usage)
                 elif path == "/api/send" and post:
                     self.response(self.relay.send(body.get("thread_id"), body.get("text"), body.get("request_id"), body.get("image_ids"),
-                                                  claude_model=body.get("claude_model"), codex_model=body.get('codex_model'), grok_model=body.get('grok_model')))
+                                                  claude_model=body.get("claude_model"), codex_model=body.get('codex_model'), grok_model=body.get('grok_model'),
+                                                  record_key=body.get('record_key'), history_head=body.get('history_head')))
                 else:
                     self.response({"error": "找不到此操作。"}, 404)
                 return

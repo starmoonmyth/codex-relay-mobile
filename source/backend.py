@@ -91,6 +91,9 @@ class Chat:
     archived: bool = False
     pinned: bool = False
     provider: str = "codex"
+    source: str = ""
+    history_head: str = ""
+    writable: bool = True
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,7 @@ class Message:
     questions: tuple[dict, ...] = ()
     client_id: str = ''
     model: str = ''
+    timestamp_ms: int = 0
 
 
 def user_images(item: dict) -> tuple[str, ...]:

@@ -8,8 +8,11 @@ import shutil
 import subprocess
 import sys
 import re
+from functools import lru_cache
+from dataclasses import replace
 
 from backend import Chat, DeliveryError, MAX_MESSAGE, Message
+from desktop_records import ClaudeDesktopRecords, claude_desktop_roots
 
 
 def validate_model(model: str) -> str:
@@ -19,7 +22,7 @@ def validate_model(model: str) -> str:
 
 
 def default_claude_home() -> pathlib.Path:
-    return pathlib.Path(os.environ.get("CLAUDE_HOME", str(pathlib.Path.home() / ".claude")))
+    return pathlib.Path(os.environ.get('CLAUDE_CONFIG_DIR') or os.environ.get("CLAUDE_HOME", str(pathlib.Path.home() / ".claude")))
 
 
 def discover_claude_cli() -> str:
@@ -97,17 +100,71 @@ def _attachment_ids(text: str) -> set[str]:
     return values
 
 
+@lru_cache(maxsize=12)
+def _transcript_nodes(path: str, modified: int, size: int):
+    nodes, legacy = {}, []
+    session_id = ''
+    try:
+        with pathlib.Path(path).open(encoding='utf-8', errors='replace') as handle:
+            for ordinal, line in enumerate(handle):
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict) or entry.get('isSidechain'):
+                    continue
+                if entry.get('type') not in ('user', 'assistant', 'system'):
+                    continue
+                if entry.get('sessionId'):
+                    session_id = session_id or entry['sessionId']
+                    if entry['sessionId'] != session_id:
+                        continue
+                entry['_ordinal'] = ordinal
+                if entry.get('uuid'):
+                    nodes[entry['uuid']] = entry
+                else:
+                    legacy.append(entry)
+    except OSError:
+        return {}, []
+    return nodes, legacy
+
+
+def claude_branch(chat):
+    if chat.source == 'claude-desktop' and not chat.history_head:
+        return []
+    path = pathlib.Path(chat.rollout_path)
+    try:
+        stat = path.stat()
+    except OSError:
+        return []
+    nodes, legacy = _transcript_nodes(str(path), stat.st_mtime_ns, stat.st_size)
+    if not nodes or (legacy and not any('parentUuid' in item for item in nodes.values())):
+        return sorted([*nodes.values(), *legacy], key=lambda item: item['_ordinal']) if not chat.history_head else []
+    head = chat.history_head or next(reversed(nodes))
+    if head not in nodes:
+        return []
+    chain, visited = [], set()
+    while head and head in nodes and head not in visited:
+        visited.add(head)
+        entry = nodes[head]
+        chain.append(entry)
+        head = entry.get('parentUuid')
+    return list(reversed(chain))
+
+
 class ClaudeData:
     """Read-only view over Claude Code's project/session JSONL transcripts."""
 
-    def __init__(self, home: pathlib.Path | None = None):
+    def __init__(self, home: pathlib.Path | None = None, desktop_roots=None):
         self.home = pathlib.Path(home or default_claude_home())
         self.projects = self.home / "projects"
+        roots = claude_desktop_roots() if self.home == default_claude_home() else []
+        self.desktop = ClaudeDesktopRecords(roots if desktop_roots is None else desktop_roots)
 
     def _files(self) -> list[pathlib.Path]:
         if not self.projects.is_dir():
             return []
-        return [path for path in self.projects.rglob("*.jsonl") if path.is_file()]
+        return [path for path in self.projects.glob("*/*.jsonl") if path.is_file() and not path.name.startswith('agent-')]
 
     def has_sessions(self) -> bool:
         if not self.projects.is_dir():
@@ -139,13 +196,13 @@ class ClaudeData:
 
     @staticmethod
     def _metadata(path: pathlib.Path) -> tuple[str, str, str, int]:
-        session_id = path.stem
+        session_id = ""
         title = ""
         cwd = ""
         updated = int(path.stat().st_mtime)
         for entry in ClaudeData._read(path, 160):
-            session_id = entry.get("sessionId") or session_id
-            cwd = entry.get("cwd") or cwd
+            session_id = session_id or entry.get("sessionId") or ""
+            cwd = cwd or entry.get("cwd") or ""
             if entry.get("type") == "custom-title" and isinstance(entry.get("customTitle"), str):
                 title = entry["customTitle"].strip()
             timestamp = entry.get("timestamp")
@@ -160,23 +217,61 @@ class ClaudeData:
                     title = _entry_text(entry).strip()
                     if title:
                         break
+        session_id = session_id or path.stem
         title = " ".join(title.split())[:180] or path.stem
         return str(session_id), title, cwd, updated
 
+    @staticmethod
+    def _last_prompt_head(path: pathlib.Path, session_id: str) -> str:
+        """Use Claude's persisted leaf when the desktop session metadata lags."""
+        head = ''
+        for entry in ClaudeData._read(path, max_bytes=256 * 1024):
+            if entry.get('type') == 'last-prompt' and entry.get('sessionId') in ('', session_id):
+                leaf = entry.get('leafUuid')
+                if isinstance(leaf, str) and leaf:
+                    head = leaf
+        return head
+
     def chats(self, archived: bool = False) -> list[Chat]:
         result = {}
+        desktop = self.desktop.sessions()
         for path in self._files():
             session_id, title, cwd, updated = self._metadata(path)
             if not cwd:
                 cwd = str(path.parent)
             public_id = f"claude:{session_id}"
+            views = desktop.get(session_id, [])
+            view = views[0] if len(views) == 1 else {}
+            source = 'claude-desktop' if views else 'claude-cli'
+            desktop_head = self._last_prompt_head(path, session_id) if views else ''
+            chat = Chat(public_id, view.get('title') or title, view.get('cwd') or cwd, str(path), updated,
+                        provider='claude', source=source,
+                        history_head=desktop_head or view.get('lastAssistantUuid') or '', writable=not views)
+            # Listing must stay cheap: the full parent chain is resolved only
+            # when a specific chat is opened. The tail still gives us a stable
+            # head for stale-send detection without reading a large transcript.
+            tail = self._read(path, max_bytes=256 * 1024) if not views else []
+            tail = [entry for entry in tail if not entry.get('sessionId') or entry.get('sessionId') == session_id]
+            has_parent_chain = any(entry.get('uuid') and entry.get('parentUuid') for entry in tail)
+            head = next((entry.get('uuid') for entry in reversed(tail)
+                         if entry.get('uuid') and entry.get('type') in ('user', 'assistant', 'system')
+                         and not entry.get('isSidechain')), '') if has_parent_chain else ''
+            branch = tail
+            if not views and head:
+                chat = replace(chat, history_head=head)
             model = ""
-            for entry in self._read(path, max_bytes=4 * 1024 * 1024):
+            for entry in tail:
                 if entry.get("type") == "assistant" and not entry.get("isSidechain"):
                     reported = (entry.get("message") or {}).get("model")
                     if isinstance(reported, str) and reported and not reported.startswith("<"):
                         model = reported
-            chat = Chat(public_id, title, cwd, str(path), updated, model=model, provider="claude")
+            chat = replace(chat, model=view.get('model') or model)
+            if len(views) > 1:
+                for view in views:
+                    native = replace(chat, id='claude-desktop:' + view['sessionId'], title=view.get('title') or title,
+                        history_head=desktop_head or view.get('lastAssistantUuid') or '', model=view.get('model') or '')
+                    result[native.id] = native
+                continue
             previous = result.get(public_id)
             if previous is None or chat.updated_at > previous.updated_at:
                 result[public_id] = chat
@@ -187,7 +282,8 @@ class ClaudeData:
         if not path.is_file():
             return []
         messages = []
-        for ordinal, entry in enumerate(self._read(path, max_bytes=4 * 1024 * 1024)):
+        for entry in claude_branch(chat):
+            ordinal = entry['_ordinal']
             role = entry.get("type")
             if role not in ("user", "assistant"):
                 continue
@@ -196,7 +292,7 @@ class ClaudeData:
             if not text:
                 continue
             message = entry.get("message") if isinstance(entry.get("message"), dict) else entry
-            message_id = (message or {}).get("id") or entry.get("uuid") or f"{chat.id}:{ordinal}"
+            message_id = entry.get("uuid") or (message or {}).get("id") or f"{chat.id}:{ordinal}"
             phase = entry.get("phase") or ""
             model = message.get("model", "") if role == "assistant" else ""
             messages.append(Message(str(message_id), role, text, ordinal=ordinal, phase=phase,
@@ -226,9 +322,6 @@ class ClaudeData:
     def turn(self, thread_id: str, turn_id: str = "") -> dict:
         return {}
 
-    def historical_receipt_message(self, receipt: dict):
-        return None
-
     def receipt_status(self, receipt: dict, messages: list[Message], queue_ids: set[str]) -> str:
         match = self.receipt_message(receipt, messages)
         if not match:
@@ -236,6 +329,10 @@ class ClaudeData:
         if any(message.role == "assistant" and message.ordinal > match.ordinal for message in messages):
             return "已完成"
         return "已接收"
+
+    def historical_receipt_message(self, receipt: dict):
+        chat = next((chat for chat in self.chats() if chat.id == receipt['thread_id']), None)
+        return self.receipt_message(receipt, self.history(chat, limit=0)) if chat else None
 
 
 def _claude_prompt(text: str, image_paths: list[pathlib.Path]) -> str:
@@ -248,8 +345,13 @@ def _claude_prompt(text: str, image_paths: list[pathlib.Path]) -> str:
 
 def deliver_claude(cli: str, chat: Chat, text: str, image_paths: list[pathlib.Path], request_id: str,
                    permission_mode: str = "bypassPermissions", run_dir: pathlib.Path | None = None,
-                   model: str = "") -> dict:
+                   model: str = "", home: pathlib.Path | None = None) -> dict:
     model = validate_model(model)
+    if not chat.id.startswith('claude:'):
+        raise ValueError('请选择可发送的 Claude Code CLI 聊天。')
+    session_id = chat.id.split(':', 1)[1]
+    if not chat.writable or chat.source == 'claude-desktop' or session_id in ClaudeDesktopRecords(claude_desktop_roots()).sessions():
+        raise ValueError('这是 Claude 桌面管理的聊天。当前仅可查看同一分支；请在 Claude 桌面发送，避免生成另一条记录。')
     if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", request_id):
         raise ValueError("消息编号无效。")
     if not text.strip() and not image_paths:
@@ -260,9 +362,23 @@ def deliver_claude(cli: str, chat: Chat, text: str, image_paths: list[pathlib.Pa
         raise FileNotFoundError("找不到 Claude Code CLI。请安装 Claude Code 扩展，或在 config.json 设置 claude_cli。")
     if not pathlib.Path(chat.cwd).is_dir():
         raise FileNotFoundError(f"聊天的项目目录不存在：{chat.cwd}")
+    home = pathlib.Path(home or default_claude_home())
+    path = pathlib.Path(chat.rollout_path)
+    if path.is_file():
+        if not path.resolve().is_relative_to((home / 'projects').resolve()) or ClaudeData._metadata(path)[0] != session_id:
+            raise ValueError('Claude 会话记录与配置目录不一致，请重新选择聊天。本次未发送。')
     prompt = _claude_prompt(text, image_paths)
     session_id = chat.id.split(":", 1)[1] if chat.id.startswith("claude:") else chat.id
     command = [cli, "--resume", session_id, "--print", "--model", model, "--output-format", "json", prompt]
+    if chat.history_head:
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', chat.history_head):
+            raise ValueError('聊天的消息链标识无效，请刷新。')
+        current = ClaudeData._read(pathlib.Path(chat.rollout_path), max_bytes=1024 * 1024)
+        latest = next((entry.get('uuid') for entry in reversed(current)
+                       if entry.get('type') in ('user', 'assistant', 'system') and entry.get('uuid') and not entry.get('isSidechain')), '')
+        if latest != chat.history_head:
+            raise ValueError('聊天记录已变化，请刷新后再发送。本次未发送。')
+        command[4:4] = ['--resume-session-at', chat.history_head]
     if permission_mode:
         command[4:4] = ["--permission-mode", permission_mode]
         if permission_mode == "bypassPermissions":
@@ -276,7 +392,7 @@ def deliver_claude(cli: str, chat: Chat, text: str, image_paths: list[pathlib.Pa
     try:
         log = log_path.open("ab")
         kwargs = {"cwd": chat.cwd, "stdin": subprocess.DEVNULL, "stdout": log, "stderr": subprocess.STDOUT,
-                  "shell": False, "close_fds": os.name != "nt"}
+                  "shell": False, "close_fds": os.name != "nt", 'env': dict(os.environ, CLAUDE_CONFIG_DIR=str(home))}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
         else:

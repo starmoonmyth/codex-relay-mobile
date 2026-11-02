@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from grok_backend import GrokData, deliver_grok, run_cli
+from grok_backend import GrokData, deliver_grok, run_cli, run_status
 
 SESSION = '00000000-0000-4000-8000-000000000001'
 
@@ -90,6 +90,34 @@ class GrokTests(unittest.TestCase):
         with mock.patch('grok_backend.subprocess.run', side_effect=wrong_session):
             run_cli(request)
         self.assertFalse(json.loads((directory / 'result.json').read_text('utf-8'))['ok'])
+
+    def test_resumed_event_counters_do_not_collide_or_match_previous_identical_text(self):
+        def user(milliseconds):
+            entry = update('user_message_chunk', 'repeat task', 'reused-event')
+            entry['params']['_meta'] = {'eventId': 'reused-event', 'agentTimestampMs': milliseconds}
+            return entry
+        chat = self.data.chats()[0]
+        self.write_updates(user(1000))
+        old = self.data.history(chat)[0]
+        receipt = {'text': 'repeat task', 'baseline_ids': [old.id], 'sent_at_ms': 1500}
+        self.write_updates(user(1000), user(2000))
+        messages = self.data.history(chat)
+        self.assertNotEqual(messages[0].id, messages[1].id)
+        self.assertEqual(self.data.receipt_message(receipt, messages), messages[1])
+        receipt.update(baseline_ids=['reused-event'], message_id='reused-event')
+        self.assertEqual(self.data.receipt_message(receipt, messages), messages[1])
+        self.assertIsNone(self.data.receipt_message(receipt, messages[:1]))
+
+    def test_completed_output_recovers_interrupted_supervisor_but_partial_or_wrong_session_does_not(self):
+        self.assertIsNone(run_status(self.root, SESSION))
+        output = self.root / 'output.json'
+        output.write_text('{"sessionId":')
+        self.assertIsNone(run_status(self.root, SESSION))
+        output.write_text(json.dumps({'sessionId': 'other', 'stopReason': 'EndTurn'}))
+        self.assertIsNone(run_status(self.root, SESSION))
+        output.write_text(json.dumps({'sessionId': SESSION, 'stopReason': 'EndTurn', 'requestId': 'prompt-a'}))
+        self.assertTrue(run_status(self.root, SESSION)['ok'])
+        self.assertEqual(run_status(self.root, SESSION)['prompt_id'], 'prompt-a')
 
 
 if __name__ == '__main__':
