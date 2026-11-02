@@ -36,7 +36,7 @@ class MobileTests(unittest.TestCase):
                 connection.execute('INSERT INTO queued_items VALUES (?,?,?)', ('q-a',chat.id,json.dumps({'text':text})))
             return {'warning':False}
         self.config = {'origin':'https://example.tailnet.ts.net:8444','port':0,'label':'Test Mac',
-                       'codex_home':str(self.home),'cli':'fixture-cli','peers':[]}
+                       'codex_home':str(self.home),'cli':'fixture-cli','peers':[], 'grok_home':str(self.root / 'grok')}
         def answer_sender(chat, text, request_id, home, queue_ids):
             self.assertEqual(home, self.home)
             self.calls.append((chat.id, text))
@@ -159,6 +159,57 @@ class MobileTests(unittest.TestCase):
         self.relay.claude = ClaudeData(self.root / 'claude')
         self.relay.set_provider('all')
         return 'claude:session-fixture'
+
+    def grok_session(self):
+        from test_grok_backend import make_session, SESSION
+        from grok_backend import GrokData
+        directory = make_session(self.root / 'grok', self.root)
+        self.relay.grok = GrokData(self.root / 'grok')
+        self.relay.grok_cli = 'fixture-grok'
+        self.relay.set_provider('all')
+        return 'grok:' + SESSION, directory
+
+    def test_grok_model_send_retry_and_failure_receipt(self):
+        identity, directory = self.grok_session()
+        cookie = self.paired()
+        status, _, raw = self.request('/api/grok/model', {'thread_id': identity, 'model': 'grok-custom'}, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)['requested_model'], 'grok-custom')
+        calls = []
+        def sender(*args):
+            calls.append(args)
+            return {'delivery_mode': 'grok-cli'}
+        self.relay.grok_sender = sender
+        body = {'thread_id': identity, 'text': 'fixture task', 'request_id': 'grok-fixture-request-01', 'grok_model': 'grok-custom'}
+        status, _, raw = self.request('/api/send', body, cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(raw)['requested_model'], 'grok-custom')
+        self.assertEqual(calls[0][6], 'grok-custom')
+        self.assertEqual(self.request('/api/send', body, cookie=cookie)[0], 200)
+        self.assertEqual(len(calls), 1)
+        blocked = self.request('/api/send', dict(body, request_id='grok-fixture-request-02'), cookie=cookie)
+        self.assertEqual(blocked[0], 400)
+        run = self.relay.root / 'grok-runs' / body['request_id']
+        run.mkdir(parents=True)
+        (run / 'result.json').write_text(json.dumps({'ok': False, 'error': 'fixture failure'}))
+        snapshot = self.relay.snapshot(identity)
+        self.assertEqual(snapshot['receipts'][-1]['result'], 'failed')
+        self.assertEqual(snapshot['receipts'][-1]['status'], '执行失败')
+        self.assertEqual(snapshot['claude_model'], None)
+        self.assertEqual(snapshot['codex_model'], None)
+
+    def test_grok_completion_and_busy_session(self):
+        from test_grok_backend import update
+        identity, directory = self.grok_session()
+        (directory / 'updates.jsonl').write_text(json.dumps(update('user_message_chunk', 'working', 'u1')) + '\n')
+        with self.assertRaisesRegex(ValueError, '正在执行'):
+            self.relay.send(identity, 'next task', 'grok-fixture-request-03')
+        with (directory / 'updates.jsonl').open('a') as output:
+            output.write(json.dumps(update('turn_completed', stop_reason='end_turn')) + '\n')
+        self.assertEqual(self.relay.snapshot(identity)['turn']['status'], 'completed')
+        image, _ = self.upload_image()
+        with self.assertRaisesRegex(ValueError, '图片投递'):
+            self.relay.send(identity, 'image task', 'grok-fixture-request-04', [image['id']])
 
     def test_claude_model_selection_persists_and_is_pinned_to_delivery(self):
         identity = self.claude_session()

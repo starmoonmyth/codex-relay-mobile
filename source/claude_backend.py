@@ -14,7 +14,7 @@ from backend import Chat, DeliveryError, MAX_MESSAGE, Message
 
 def validate_model(model: str) -> str:
     if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/+@\[\]-]{0,199}", model):
-        raise ValueError("请选择 Claude 模型，或填写有效的模型 ID。")
+        raise ValueError("请选择模型，或填写有效的模型 ID。")
     return model
 
 

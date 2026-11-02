@@ -1,6 +1,6 @@
 # Codex Relay Mobile · Codex 手机消息助手
 
-通过 Tailscale，在手机上继续 Mac 或 Windows 上已有的 Codex 或 Claude Code 聊天。电脑负责执行，手机可以发任务、上传图片、回复结构化提问并接收任务通知。
+通过 Tailscale，在手机上继续 Mac 或 Windows 上已有的 Codex、Claude Code 或 Grok CLI 聊天。电脑负责执行，手机可以发任务、上传图片、回复结构化提问并接收任务通知。
 
 ## 下载
 
@@ -19,7 +19,7 @@
 
 ## 功能
 
-- 查看已有 Codex / Claude Code 聊天、项目与回复，在同一原生会话中继续发送任务。
+- 查看已有 Codex / Claude Code / Grok CLI 聊天、项目与回复，在同一原生会话中继续发送任务。
 - 发送文字、多张图片或图文消息；单张图片最多 8 MB，每条消息图片合计最多 32 MB。
 - 回复结构化提问中的选项或自定义答案，由持有聊天的桌面窗口即时提交。
 - 查看入队、接收、执行中、完成和失败状态，恢复草稿，防止重复提交。
@@ -49,6 +49,18 @@ iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中�
 
 推送服务接受请求与手机收到通知是两个阶段，界面会分别显示回执。通知包含电脑名称、聊天标题与状态；点击后通过 Tailscale 返回聊天。电脑需要保持运行并能访问 Apple、Google、Mozilla 或 Microsoft 的推送服务。
 
+## Grok CLI 接入
+
+电脑先安装并登录 [Grok CLI](https://x.ai/cli)，创建一个聊天。手机侧边栏的“工作台”选择 **Grok**，再选择已有聊天；输入框上方可以选择模型或填写自定义 ID。模型目录来自本机 Grok，认证与端点由 Grok 自己管理。
+
+适配读取 `~/.grok/sessions`，使用官方 `--resume` 和显式 `--model` 继续同一个会话。已有任务执行中时会提示等待，避免同时写入一个聊天。CLI 退出失败或返回了其他会话时会显示执行失败。工具权限沿用 Grok 的本机设置；手机暂不处理 Grok 工具审批，需要在电脑处理。
+
+当前 Grok 接入支持文字续聊、模型选择、回复和执行状态；图片、结构化选项和 Grok 系统推送尚未开放。未安装 Grok CLI 或没有本机会话的电脑，手机会将 Grok 选项标为不可用。这条路径不读取或控制 grok.com 的网页聊天。
+
+## 聊天状态
+
+右上角使用文字、图标和颜色共同区分状态：蓝色旋转图标表示处理中，绿色勾选表示已完成，红色错误图标表示失败，黄色分别表示排队、待回复、待确认或中断。新任务等待接收时优先显示队列状态，连接断开会单独显示，避免沿用旧的完成状态。
+
 ## 配置与多设备
 
 配置保存在本机数据目录的 `config.json`：
@@ -69,7 +81,7 @@ iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中�
 }
 ```
 
-此片段只替换 `peers` 字段，其余自动生成的配置应保留。两台电脑分别扫描配对、分别开启通知。可选 `codex_home` 和 `cli` 字段用于指定非默认 Codex 数据目录或 CLI 路径。电脑连接页和手机侧边栏的“工作台”都可以切换 `Codex`、`Claude Code` 或两者。
+此片段只替换 `peers` 字段，其余自动生成的配置应保留。两台电脑分别扫描配对、分别开启通知。可选 `codex_home` 和 `cli` 字段用于指定非默认 Codex 数据目录或 CLI 路径。电脑连接页和手机侧边栏的“工作台”都可以切换 `Codex`、`Claude Code` 、`Grok` 或全部工作台。
 
 Claude Code 适配读取 `~/.claude/projects`（也可设置 `claude_home`），按 JSONL 会话 ID 调用本机 Claude Code CLI 的 `--resume` 继续原会话。Windows 会自动查找 VS Code Claude Code 扩展内置的 `claude.exe`，Mac 可设置 `claude_cli` 指向已安装的 CLI。Claude Code 的图片会保存为助手附件目录，并在任务中提供给 Claude Code 读取；这条路径不伪造 Claude Desktop 的内部 Electron IPC。
 

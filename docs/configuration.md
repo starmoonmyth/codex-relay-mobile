@@ -17,7 +17,7 @@
 | `peers` | 设备切换列表，元素包含 `label` 和 `origin` |
 | `codex_home` | 可选，Codex 数据目录，默认 `CODEX_HOME` 或 `~/.codex` |
 | `cli` | 可选，本机 Codex CLI 可执行文件的绝对路径 |
-| `provider` | `codex`（默认）、`claude` 或 `all`；也可在本机连接页切换 |
+| `provider` | `codex`（默认）、`claude`、`grok` 或 `all`；也可在本机连接页切换 |
 | `claude_home` | 可选，Claude Code 数据目录，默认 `~/.claude` |
 | `claude_cli` | 可选，Claude Code CLI 的绝对路径；Windows 会自动查找 VS Code 扩展内置 CLI |
 | `claude_model` | 可选，此电脑助手的默认 Claude 模型；聊天自己的选择优先 |
@@ -40,6 +40,12 @@ Claude Code 会话来自 `claude_home/projects` 下的 JSONL 文件。发送时�
 发送的消息显示“请求模型”，每条 Claude 回复标注会话记录中的 `message.model`。别名可由 Claude Code 或服务商解析，因此请求名称与回复名称可能不同。通过中转站时，这些名称属于接口报告信息，本助手无法独立核验上游真正运行的模型；响应速度也不能证明模型身份。
 
 `source/peers.json` 仅用于新配置的默认设备列表。修改已运行设备的列表，应编辑数据目录中的 `config.json`。
+
+## Grok 配置
+
+`grok_cli` 可指定 CLI 路径，`grok_home` 可指定会话目录，默认 `GROK_HOME` 或 `~/.grok`。`grok_model` 是此助手的默认模型，`grok_chat_models` 保存各聊天的选择。可选 `grok_permission_mode` 显式传给 Grok；省略时沿用 Grok 的本机权限设置。
+
+此适配只读取 Grok 的会话记录和模型名称，任务交给官方 CLI，不复制登录凭证，也不改写 Grok 聊天文件。后台执行使用独立监督进程记录 CLI 的退出结果，服务停止后已经提交的 Grok 任务仍可继续。图片和手机工具审批尚未开放。
 
 ## 常见问题
 

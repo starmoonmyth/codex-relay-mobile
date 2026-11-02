@@ -26,6 +26,7 @@ from image_delivery import deliver_images
 from notifications import Notifications, question_answers
 from app_bridge import deliver_answer, desktop_model
 from codex_models import list_models
+from grok_backend import GrokData, default_grok_home, discover_grok_cli, deliver_grok, read_json
 
 STATIC = pathlib.Path(__file__).resolve().parent / "web"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -41,7 +42,7 @@ def mobile_state():
 class Relay:
     def __init__(self, root=None, config=None, sender=deliver, image_sender=deliver_images,
                  answer_sender=deliver_answer, claude_sender=deliver_claude,
-                 model_bridge=desktop_model, model_catalog=list_models):
+                 model_bridge=desktop_model, model_catalog=list_models, grok_sender=deliver_grok):
         self.root = pathlib.Path(root or mobile_state())
         self.root.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
@@ -58,8 +59,11 @@ class Relay:
         self.cli = self.config.get("cli") or discover_cli()
         self.claude = ClaudeData(pathlib.Path(self.config.get("claude_home") or default_claude_home()))
         self.claude_cli = self.config.get("claude_cli") or discover_claude_cli()
+        self.grok = GrokData(self.config.get('grok_home') or default_grok_home())
+        self.grok_cli = self.config.get('grok_cli') or discover_grok_cli()
+        self.grok_sender = grok_sender
         self.provider_mode = self.config.get("provider", "codex")
-        if self.provider_mode not in ("codex", "claude", "all"):
+        if self.provider_mode not in ("codex", "claude", "grok", "all"):
             self.provider_mode = "codex"
         self.sender = sender
         self.image_sender = image_sender
@@ -147,14 +151,16 @@ class Relay:
             chats.extend(self.data.chats())
         if self.provider_mode in ("claude", "all"):
             chats.extend(self.claude.chats())
+        if self.provider_mode in ('grok', 'all'):
+            chats.extend(self.grok.chats())
         return sorted(chats, key=lambda chat: (chat.pinned, chat.updated_at), reverse=True)
 
     def data_for(self, chat):
-        return self.claude if chat.provider == "claude" else self.data
+        return self.grok if chat.provider == 'grok' else self.claude if chat.provider == "claude" else self.data
 
     def set_provider(self, provider):
-        if provider not in ("codex", "claude", "all"):
-            raise ValueError("provider 必须是 codex、claude 或 all。")
+        if provider not in ("codex", "claude", "grok", "all"):
+            raise ValueError("provider 必须是 codex、claude、grok 或 all。")
         with self.lock:
             self.provider_mode = provider
             self.config["provider"] = provider
@@ -246,12 +252,38 @@ class Relay:
             self.save_config()
             return self.claude_model_info(chat)
 
+    def grok_model_info(self, chat, messages=None):
+        selected = self.config.get('grok_chat_models', {}).get(chat.id, '')
+        automatic = self.config.get('grok_model') or chat.model
+        choices = [selected, automatic, chat.model, *self.grok.model_choices()]
+        messages = self.grok.history(chat) if messages is None else messages
+        last_model = next((message.model for message in reversed(messages) if message.role == 'assistant' and message.model), '')
+        return {'selected': selected, 'requested_model': selected or automatic, 'automatic_model': automatic,
+                'automatic_source': 'default' if self.config.get('grok_model') else 'history',
+                'last_response_model': last_model, 'choices': list(dict.fromkeys(model for model in choices if model))}
+
+    def set_grok_model(self, identity, model):
+        if model != '':
+            validate_model(model)
+        with self.lock:
+            chat = self.chat(identity)
+            if not chat or chat.provider != 'grok':
+                raise ValueError('请选择一个 Grok 聊天。')
+            models = self.config.setdefault('grok_chat_models', {})
+            if model:
+                models[identity] = model
+            else:
+                models.pop(identity, None)
+            self.save_config()
+            return self.grok_model_info(chat)
+
     def provider_info(self):
         return {
             "provider": self.provider_mode,
             "available": {
                 "codex": bool(self.cli),
                 "claude": bool(self.claude_cli and self.claude.has_sessions()),
+                'grok': bool(self.grok_cli and self.grok.has_sessions()),
             },
         }
 
@@ -315,7 +347,7 @@ class Relay:
     def image_path(self, image):
         return self.root / "uploads" / (image["id"] + IMAGE_SUFFIX[image["mime"]])
 
-    def send(self, identity, text, request_id, image_ids=None, immediate=False, claude_model=None, codex_model=None):
+    def send(self, identity, text, request_id, image_ids=None, immediate=False, claude_model=None, codex_model=None, grok_model=None):
         image_ids = [] if image_ids is None else image_ids
         if not isinstance(image_ids, list) or any(not isinstance(item, str) for item in image_ids):
             raise ValueError("图片列表无效。")
@@ -344,6 +376,15 @@ class Relay:
                 raise ValueError("聊天不存在或已归档，请重新选择。")
             data = self.data_for(chat)
             images = [self.image(item) for item in image_ids]
+            if chat.provider == 'grok':
+                if images:
+                    raise ValueError('Grok 当前支持文字续聊，图片投递尚未开放。')
+                if data.turn(identity).get('status') in ('inProgress', 'needsInput'):
+                    raise ValueError('这个 Grok 聊天正在执行任务，请完成后再发送。')
+                with self.connect() as connection:
+                    previous = connection.execute('SELECT id,receipt FROM deliveries WHERE thread_id=? ORDER BY rowid DESC LIMIT 1', (identity,)).fetchone()
+                if previous and json.loads(previous['receipt']).get('result') == 'sent' and not (self.root / 'grok-runs' / previous['id'] / 'result.json').is_file():
+                    raise ValueError('上一条 Grok 任务尚未结束，请先查看原聊天。本次未发送。')
             if sum(image['size'] for image in images) > MAX_ATTACHMENT_BYTES:
                 raise ValueError('每条消息的图片总大小最多 32 MB，请移除部分图片后发送。')
             messages = data.history(chat)
@@ -352,7 +393,9 @@ class Relay:
             receipt["id"] = request_id
             receipt["images"] = images
             receipt["provider"] = chat.provider
-            if chat.provider == "claude":
+            if chat.provider == 'grok':
+                receipt['requested_model'] = validate_model(self.grok_model_info(chat)['requested_model'] if grok_model is None else grok_model)
+            elif chat.provider == "claude":
                 # Pin the model before starting the CLI; desktop UI settings are independent.
                 receipt["requested_model"] = validate_model(
                     self.claude_model_info(chat)["requested_model"] if claude_model is None else claude_model)
@@ -371,7 +414,10 @@ class Relay:
                     connection.execute("INSERT INTO deliveries VALUES (?,?,?,?,?)",
                         (request_id, identity, text, json.dumps(receipt, ensure_ascii=False), int(time.time())))
             try:
-                if chat.provider == "claude":
+                if chat.provider == 'grok':
+                    result = self.grok_sender(self.grok_cli, self.grok.home, chat, text, request_id,
+                        self.root / 'grok-runs', receipt['requested_model'], self.config.get('grok_permission_mode', ''))
+                elif chat.provider == "claude":
                     result = self.claude_sender(
                         self.claude_cli, chat, text, [self.image_path(image) for image in images],
                         request_id, self.config.get("claude_permission_mode", "bypassPermissions"),
@@ -385,6 +431,8 @@ class Relay:
                 receipt['delivery_mode'] = result.get('delivery_mode','queue')
                 if chat.provider == "claude":
                     receipt['status'] = 'Claude Code 已启动 · 等待回复'
+                elif chat.provider == 'grok':
+                    receipt['status'] = 'Grok 已启动 · 等待回复'
                 if immediate:
                     receipt['turn_id'] = result.get('turn_id')
                     receipt['status'] = '桌面已接收 · 已立即提交'
@@ -414,8 +462,8 @@ class Relay:
     def answer(self, identity, message_id, answers, request_id):
         with self.answer_lock:
             chat = self.chat(identity)
-            if chat is not None and chat.provider == "claude":
-                raise ValueError("Claude Code 的提问回复请直接发送文字；原生结构化选项暂未开放。")
+            if chat is not None and chat.provider in ('claude', 'grok'):
+                raise ValueError("这个工作台的提问回复请直接发送文字；原生结构化选项暂未开放。")
             snapshot = self.snapshot(identity)
             message = next((item for item in snapshot['messages'] if item['id'] == message_id and item['questions']), None)
             if message is None:
@@ -447,6 +495,13 @@ class Relay:
             receipts = [json.loads(row[0]) for row in connection.execute(
                 "SELECT receipt FROM deliveries WHERE thread_id=? ORDER BY created DESC, rowid DESC LIMIT 30", (identity,))]
             for receipt in receipts:
+                if chat.provider == 'grok' and receipt.get('result') == 'sent':
+                    finished = read_json(self.root / 'grok-runs' / receipt['id'] / 'result.json')
+                    if finished:
+                        if finished.get('ok'):
+                            receipt['grok_finished'] = True
+                        else:
+                            receipt.update(result='failed', status='执行失败', error=finished.get('error', 'Grok 执行失败。'))
                 match = data.receipt_message(receipt, messages)
                 if not match and receipt.get('result') == 'sent' and not set(receipt.get('queue_ids', [])) & queue_ids:
                     match = data.historical_receipt_message(receipt)
@@ -503,6 +558,7 @@ class Relay:
         return {"chat": dataclasses.asdict(chat), "messages": output,
                 "claude_model": self.claude_model_info(chat) if chat.provider == "claude" else None,
                 "codex_model": self.codex_model_info(chat) if chat.provider == 'codex' else None,
+                'grok_model': self.grok_model_info(chat, messages) if chat.provider == 'grok' else None,
                 "receipts": list(reversed(receipts)), "turn": data.turn(identity)}
 
 
@@ -601,7 +657,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.notifications.acknowledge(body.get('token'),body.get('stage'),body.get('error','')))
                     return
             if path == "/api/health" and not post:
-                self.response({"app": "CodexRelayMobile", "version": "1.3.4", "label": self.relay.config.get("label", socket.gethostname())})
+                self.response({"app": "CodexRelayMobile", "version": "1.3.5", "label": self.relay.config.get("label", socket.gethostname())})
                 return
             if path.startswith("/api/local/"):
                 if not self.local() or post:
@@ -651,6 +707,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.set_provider(body.get('provider')))
                 elif path == '/api/claude/model' and post:
                     self.response(self.relay.set_claude_model(body.get('thread_id'), body.get('model')))
+                elif path == '/api/grok/model' and post:
+                    self.response(self.relay.set_grok_model(body.get('thread_id'), body.get('model')))
                 elif path == '/api/codex/model' and post:
                     self.response(self.relay.set_codex_model(body.get('thread_id'), body.get('model')))
                 elif path == '/api/codex/models' and post:
@@ -673,7 +731,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.snapshot(urllib.parse.unquote(path[len("/api/chat/"):])))
                 elif path == "/api/send" and post:
                     self.response(self.relay.send(body.get("thread_id"), body.get("text"), body.get("request_id"), body.get("image_ids"),
-                                                  claude_model=body.get("claude_model"), codex_model=body.get('codex_model')))
+                                                  claude_model=body.get("claude_model"), codex_model=body.get('codex_model'), grok_model=body.get('grok_model')))
                 else:
                     self.response({"error": "找不到此操作。"}, 404)
                 return

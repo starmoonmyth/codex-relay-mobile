@@ -1,6 +1,49 @@
 const $ = id => document.getElementById(id);
-const state = {chat:null,chats:[],meta:null,busy:false,refreshing:false,snapshot:'',lastList:0,modelInfo:null,modelSaving:false};
+const state = {chat:null,chats:[],meta:null,busy:false,refreshing:false,snapshot:'',lastList:0,modelInfo:null,modelSaving:false,lastData:null,online:true};
 const attachmentDrafts = new Map();
+function chatStatus(data) {
+  if(state.busy)return 'sending';
+  const latest=data.receipts.at(-1),turn=data.turn?.status;
+  if(latest?.result==='failed')return 'failed';
+  if(latest&&!latest.seen_in_history&&!latest.grok_finished){
+    if(latest.status==='正在投递')return 'sending';
+    if(latest.result==='uncertain')return 'uncertain';
+    if(latest.result==='sent')return ['claude','grok'].includes(data.chat.provider)?'working':'queued';
+  }
+  const unanswered=data.messages.some(message=>message.questions?.some(question=>question.answer==null));
+  if(unanswered&&turn!=='completed'&&turn!=='failed'&&turn!=='interrupted')return 'needs_input';
+  if(turn==='inProgress')return 'working';
+  if(turn==='needsInput')return 'needs_input';
+  if(turn==='failed')return 'failed';
+  if(turn==='interrupted')return 'interrupted';
+  if(turn==='completed'||latest?.grok_finished||latest?.status==='已完成')return 'completed';
+  if(['claude','grok'].includes(data.chat.provider)){
+    const last=data.messages.at(-1);
+    if(last?.role==='user')return 'working';
+    if(last?.role==='assistant')return 'completed';
+  }
+  return 'idle';
+}
+function drawTurnStatus(kind) {
+  const labels={idle:'就绪',loading:'读取中',sending:'发送中',queued:'排队中',working:'处理中',needs_input:'待你回复',completed:'已完成',failed:'失败',interrupted:'已中断',uncertain:'待确认',offline:'连接中断'};
+  const icon={idle:'<circle cx="12" cy="12" r="8"/><path d="m8 12 3 3 5-6"/>',
+    loading:'<circle cx="12" cy="12" r="8" stroke-dasharray="32 18"/>',
+    sending:'<path d="M12 19V5m-6 6 6-6 6 6"/>',
+    queued:'<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    working:'<circle cx="12" cy="12" r="8" stroke-dasharray="32 18"/>',
+    needs_input:'<path d="M5 4h14v12H9l-4 4V4Z"/><path d="M12 7v4m0 2v.1"/>',
+    completed:'<circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/>',
+    failed:'<path d="m8 3-5 5v8l5 5h8l5-5V8l-5-5H8Z"/><path d="m9 9 6 6m0-6-6 6"/>',
+    interrupted:'<circle cx="12" cy="12" r="9"/><path d="M9 8v8m6-8v8"/>',
+    uncertain:'<circle cx="12" cy="12" r="9"/><path d="M9 9a3 3 0 0 1 6 0c0 2-3 2-3 4m0 3v.1"/>',
+    offline:'<path d="m3 3 18 18M4 10a12 12 0 0 1 3-2m3-1a12 12 0 0 1 10 3M7 14a7 7 0 0 1 3-1m5 1 2 1M12 18v.1"/>'};
+  const badge=$('turn-status');if(badge.dataset.state===kind&&badge.querySelector('svg'))return;
+  badge.dataset.state=kind;badge.replaceChildren();
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  for(const [name,value] of Object.entries({viewBox:'0 0 24 24',fill:'none',stroke:'currentColor','stroke-width':'2','stroke-linecap':'round','stroke-linejoin':'round','aria-hidden':'true'}))svg.setAttribute(name,value);
+  svg.innerHTML=icon[kind]||icon.idle;badge.append(svg,node('span','status-label',labels[kind]||labels.idle));
+  badge.title=kind==='needs_input'?'有问题需要你回复':kind==='uncertain'?'投递结果尚未确认，请先检查原聊天':labels[kind]||labels.idle;
+}
 const storage = {
   get(key, fallback='') { try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; } },
   set(key, value) { try { localStorage.setItem(key,value); } catch {} },
@@ -9,7 +52,7 @@ const storage = {
 const key = (kind, id=state.chat?.id) => `${kind}:${id}`;
 function pending(id=state.chat?.id) { try { return JSON.parse(storage.get(key('pending',id),'null')); } catch { return null; } }
 function notice(text) { $('send-notice').textContent = text; }
-function connection(text, online) { $('connection').textContent=text; $('connection').classList.toggle('online',online); }
+function connection(text, online) { state.online=online;$('connection').textContent=text;$('connection').classList.toggle('online',online);if(state.chat)drawTurnStatus(!online?'offline':state.lastData?chatStatus(state.lastData):'loading'); }
 async function api(path, body) {
   let response;
   const controller=new AbortController(),timeout=setTimeout(()=>controller.abort(),path==='/api/send'||path==='/api/answer'||path.startsWith('/api/codex/model')?90000:15000);
@@ -34,10 +77,10 @@ function drawList() {
     const button=node('button','chat'+(chat.id===state.chat?.id?' active':''));
     button.append(node('span','chat-name',(chat.pinned?'⌁ ':'')+chat.title));
     const meta=node('span','chat-meta'); const project=chat.cwd.replaceAll('\\','/').split('/').filter(Boolean).pop()||'未指定项目';
-    meta.append(node('span','project',(chat.provider==='claude'?'Claude · ':'Codex · ')+project),node('span','',timeLabel(chat.updated_at)));button.append(meta);
+    meta.append(node('span','project',({claude:'Claude · ',grok:'Grok · ',codex:'Codex · '})[chat.provider]+project),node('span','',timeLabel(chat.updated_at)));button.append(meta);
     button.onclick=()=>selectChat(chat); list.append(button);
   }
-  if(!chats.length)list.append(node('p','small',state.chats.length?'没有匹配的聊天。':'还没有聊天。请先在电脑的 Codex 或 Claude Code 中打开一个聊天。'));
+  if(!chats.length)list.append(node('p','small',state.chats.length?'没有匹配的聊天。':'还没有聊天。请先在电脑的 Codex、Claude Code 或 Grok 中打开一个聊天。'));
 }
 function imagesFor(id=state.chat?.id) {
   if(!id)return [];
@@ -51,11 +94,13 @@ function saveImages(id) {storage.set(key('images',id),JSON.stringify(imagesFor(i
 function imageIds(id=state.chat?.id) {return imagesFor(id).filter(image=>image.id).map(image=>image.id);}
 function sameImages(a,b) {return JSON.stringify(a||[])===JSON.stringify(b||[]);}
 function updateSend() {
+  if(state.chat)drawTurnStatus(!state.online?'offline':state.busy?'sending':state.lastData?chatStatus(state.lastData):'loading');
   const images=imagesFor(),loading=images.some(image=>image.uploading||image.failed);
-  const modelRequired=state.chat?.provider==='claude'&&!state.modelInfo?.requested_model;
+  const modelRequired=['claude','grok'].includes(state.chat?.provider)&&!state.modelInfo?.requested_model;
   $('send').disabled=!state.chat||(!$('message').value.trim()&&!images.length)||state.busy||loading||modelRequired||state.modelSaving;
   $('choose-model').disabled=state.busy||state.modelSaving;
-  $('add-image').disabled=!state.chat||state.busy;
+  $('add-image').disabled=!state.chat||state.busy||state.chat.provider==='grok';
+  $('add-image').title=state.chat?.provider==='grok'?'Grok 当前支持文字续聊':'选择照片或拍照';
   for(const button of $('attachment-drafts').querySelectorAll('button'))button.disabled=state.busy;
 }
 function imageGallery(images) {
@@ -102,6 +147,7 @@ async function prepareImage(file) {
 }
 async function addImages(files) {
   if(!state.chat||state.busy)return;
+  if(state.chat.provider==='grok'){notice('Grok 当前支持文字续聊，图片投递尚未开放。');return;}
   const chatId=state.chat.id;
   for(const file of Array.from(files)) {
     const list=imagesFor(chatId);
@@ -120,8 +166,10 @@ async function addImages(files) {
 function resizeComposer() { $('message').style.height='auto'; $('message').style.height=Math.min($('message').scrollHeight,window.innerHeight*.3)+'px'; }
 async function selectChat(chat) {
   if(state.chat)storage.set(key('draft'),$('message').value);
-  state.chat=chat;state.snapshot='';state.modelInfo=null;drawModel(null);storage.set('selected-chat',chat.id);
+  state.chat=chat;state.lastData=null;state.online=true;drawTurnStatus('loading');state.snapshot='';state.modelInfo=null;drawModel(null);storage.set('selected-chat',chat.id);
   $('chat-title').textContent=chat.title; $('chat-path').textContent=chat.cwd;
+  $('message').placeholder=chat.provider==='grok'?'输入 Grok 任务…':'输入任务，或添加图片…';
+  document.querySelector('.composer-wrap .hint').textContent=chat.provider==='grok'?'Grok 当前支持文字续聊':'图片合计最多 32 MB · 发送后电脑继续工作';
   $('message').disabled=false;$('message').value=storage.get(key('draft'));resizeComposer();drawImages();updateSend();notice('');
   $('conversation').replaceChildren(node('p','small','正在读取聊天…'));drawList();drawer(false);
   const attempt=pending(); if(attempt)notice('有一条投递等待确认。原文再次发送会查询同一条记录。');
@@ -140,7 +188,9 @@ function markdown(text) {
   return wrapper;
 }
 function renderSnapshot(data, force) {
-  drawModel(data.chat.provider==='claude'?data.claude_model:data.codex_model);
+  state.lastData=data;
+  drawModel(data.chat.provider==='grok'?data.grok_model:data.chat.provider==='claude'?data.claude_model:data.codex_model);
+  drawTurnStatus(chatStatus(data));
   const box=$('conversation');const near=box.scrollHeight-box.scrollTop-box.clientHeight<100;
   const signature=JSON.stringify(data);if(signature===state.snapshot)return;
   state.snapshot=signature;
@@ -153,7 +203,7 @@ function renderSnapshot(data, force) {
       if(m.text)bubble.append(node('div','user-text',m.text));
       if(m.requested_model)bubble.append(node('div','small','请求模型：'+m.requested_model));
     }
-    else{const name=data.chat.provider==='claude'?'CLAUDE · '+(m.model||'模型未记录'):'CODEX';bubble.append(node('span','speaker',m.questions?.length?name+' · 需要回复':m.phase==='commentary'?name+' · 进展':name));if(m.questions?.length)bubble.append(questionCard(m,data.chat.id));else bubble.append(markdown(m.text));}
+    else{const name=data.chat.provider==='codex'?'CODEX':data.chat.provider.toUpperCase()+' · '+(m.model||'模型未记录');bubble.append(node('span','speaker',m.questions?.length?name+' · 需要回复':m.phase==='commentary'?name+' · 进展':name));if(m.questions?.length)bubble.append(questionCard(m,data.chat.id));else bubble.append(markdown(m.text));}
     fragment.append(bubble);
   }
   for(const receipt of data.receipts) {
@@ -166,8 +216,8 @@ function renderSnapshot(data, force) {
   if(!fragment.childNodes.length)fragment.append(node('p','small','还没有消息。在下方输入任务，继续这个聊天。'));
   const oldTop=box.scrollTop;box.replaceChildren(fragment);
   if(near||force){box.scrollTop=box.scrollHeight;$('jump').hidden=true;} else {box.scrollTop=oldTop;$('jump').hidden=false;}
-  const turn=data.turn?.status;$('turn-status').textContent=({inProgress:'处理中',completed:'已完成',failed:'执行失败',interrupted:'已中断'})[turn]||'就绪';
   const attempt=pending(data.chat.id);
+  if(data.receipts.at(-1)?.status==='已完成'&&/已启动.*回复/.test($('send-notice').textContent))notice('任务已完成。');
   if(attempt) {
     const receipt=data.receipts.find(r=>r.id===attempt.request_id);
     if(receipt&&receipt.status!=='正在投递')settle(receipt,attempt,data.chat.id);
@@ -180,7 +230,7 @@ function settle(receipt,attempt,chatId) {
     if(sameImages(imageIds(chatId),attempt.image_ids)){attachmentDrafts.set(chatId,[]);saveImages(chatId);if(state.chat?.id===chatId)drawImages();}
     if(state.chat?.id===chatId) {
       if($('message').value===attempt.text){$('message').value='';resizeComposer();}
-      notice(receipt.status==='已完成'?'已完成。':receipt.provider==='claude'?'Claude Code 已启动，回复会在这里更新。':receipt.warning?'消息已入队，CLI 有提示，请查看原聊天。':'已入队，电脑接收后会在这里显示回复。');
+      notice(receipt.status==='已完成'?'已完成。':['claude','grok'].includes(receipt.provider)?(receipt.provider==='grok'?'Grok':'Claude Code')+' 已启动，回复会在这里更新。':receipt.warning?'消息已入队，CLI 有提示，请查看原聊天。':'已入队，电脑接收后会在这里显示回复。');
     }
   }else if(receipt.result==='failed') {
     storage.remove(key('pending',chatId));
@@ -198,7 +248,7 @@ async function loadChats() {
 }
 function drawProviderSelector() {
   const select=$('provider'); if(!select||!state.meta)return;
-  const labels={codex:'Codex',claude:'Claude Code',all:'Codex + Claude Code'};
+  const labels={codex:'Codex',claude:'Claude Code',grok:'Grok',all:'全部工作台'};
   select.value=state.meta.provider||'codex';
   for(const option of select.options) {
     option.disabled=option.value!=='all'&&!state.meta.available?.[option.value];
@@ -218,10 +268,10 @@ function drawModel(info) {
 }
 $('choose-model').onclick=async()=>{
   const id=state.chat?.id,provider=state.chat?.provider;if(!id)return;
-  const codex=provider==='codex';
-  $('model-title').textContent='这个聊天的 '+(codex?'Codex':'Claude')+' 模型';
-  $('model-description').textContent=codex?'同步修改原聊天的下一轮模型，电脑端也会使用这个设置。进行中的回复继续使用原模型。':'从这里发送的任务使用下方模型，与 Claude 桌面端分别设置。修改在下次发送时生效。';
-  $('model-help').textContent=codex?'模型列表来自此电脑的 Codex。队列在执行时使用原聊天的模型；电脑端后续修改也会影响排队任务。中转站可填写模型 ID。':'Opus、Sonnet、Haiku 是 Claude Code 别名。中转站可填写完整模型 ID。回复标注接口报告的模型。';
+  const codex=provider==='codex',grok=provider==='grok';
+  $('model-title').textContent='这个聊天的 '+(codex?'Codex':grok?'Grok':'Claude')+' 模型';
+  $('model-description').textContent=grok?'恢复原 Grok CLI 会话，并在每次发送时明确指定模型。进行中的任务完成后才能继续发送。':codex?'同步修改原聊天的下一轮模型，电脑端也会使用这个设置。进行中的回复继续使用原模型。':'从这里发送的任务使用下方模型，与 Claude 桌面端分别设置。修改在下次发送时生效。';
+  $('model-help').textContent=grok?'模型列表来自此电脑 Grok 的本地目录，也可填写自定义模型 ID。':codex?'模型列表来自此电脑的 Codex。队列在执行时使用原聊天的模型；电脑端后续修改也会影响排队任务。中转站可填写模型 ID。':'Opus、Sonnet、Haiku 是 Claude Code 别名。中转站可填写完整模型 ID。回复标注接口报告的模型。';
   const select=$('model-choice');select.replaceChildren();$('model-error').textContent='';$('custom-model').hidden=true;
   $('save-model').disabled=true;$('model-settings').showModal();
   state.modelSaving=true;updateSend();
@@ -246,7 +296,7 @@ $('model-form').onsubmit=async event=>{
   if(!model&&!state.modelInfo.automatic_model){$('model-error').textContent='请选择模型。';return;}
   state.modelSaving=true;$('save-model').disabled=true;updateSend();
   try{
-    const info=await api(state.chat.provider==='codex'?'/api/codex/model':'/api/claude/model',{thread_id:id,model});
+    const info=await api(state.chat.provider==='codex'?'/api/codex/model':state.chat.provider==='grok'?'/api/grok/model':'/api/claude/model',{thread_id:id,model});
     if(state.chat?.id===id){drawModel(info);notice((state.chat.provider==='codex'?'已同步原聊天下一轮模型：':'下次发送使用：')+modelLabel(info.requested_model));}
     $('model-settings').close();
   }catch(error){$('model-error').textContent=error.message;}
@@ -271,7 +321,7 @@ $('pair-form').onsubmit=async event=>{event.preventDefault();try{await api('/api
 $('composer').onsubmit=async event=>{
   event.preventDefault();if(state.busy||!state.chat||$('send').disabled)return;
   const id=state.chat.id,text=$('message').value,image_ids=imageIds();const previous=pending(id);
-  const attempt=previous?.text===text&&sameImages(previous.image_ids,image_ids)?previous:{thread_id:id,text,image_ids,request_id:crypto.randomUUID(),...(state.chat.provider==='claude'?{claude_model:state.modelInfo.requested_model}:state.modelInfo?.requested_model?{codex_model:state.modelInfo.requested_model}:{})};
+  const attempt=previous?.text===text&&sameImages(previous.image_ids,image_ids)?previous:{thread_id:id,text,image_ids,request_id:crypto.randomUUID(),...(state.chat.provider==='grok'?{grok_model:state.modelInfo.requested_model}:state.chat.provider==='claude'?{claude_model:state.modelInfo.requested_model}:state.modelInfo?.requested_model?{codex_model:state.modelInfo.requested_model}:{})};
   storage.set(key('pending',id),JSON.stringify(attempt));storage.set(key('draft',id),text);
   state.busy=true;updateSend();notice('正在投递…');
   try {const receipt=await api('/api/send',attempt);settle(receipt,attempt,id);if(state.chat?.id===id)await refreshChat(true);}
@@ -460,7 +510,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.3.4'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.5'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -485,7 +535,7 @@ async function inspectNotificationWorker() {
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.3.4 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.5 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }

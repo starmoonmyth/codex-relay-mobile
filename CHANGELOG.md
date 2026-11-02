@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.5
+
+- Add Grok CLI text sessions, per-chat model selection, original-session resume and verified CLI completion receipts.
+- Protect running Grok sessions from overlapping submissions and keep CLI execution supervision independent of the web service.
+- Add distinct status colors, SVG icons, readable labels, reduced motion support and mobile layouts down to 320 pixels.
+- Show queued submissions, unanswered questions, uncertain delivery and disconnected states instead of retaining an older completed badge.
+
 ## 1.3.4
 
 - Add Codex model selection to the shared mobile model dialog, using the local Codex model catalog and custom model IDs.

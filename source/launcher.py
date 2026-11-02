@@ -141,5 +141,8 @@ if __name__ == "__main__":
     if '--app-bridge' in sys.argv:
         from app_bridge import helper_main
         helper_main()
+    elif '--grok-run' in sys.argv:
+        from grok_backend import run_cli
+        run_cli(sys.argv[-1])
     else:
         main()
