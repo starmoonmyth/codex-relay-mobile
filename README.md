@@ -2,12 +2,12 @@
 
 通过 Tailscale，在手机上继续 Mac 或 Windows 上已有的 Codex 或 Claude Code 聊天。电脑负责执行，手机可以发任务、上传图片、回复结构化提问并接收任务通知。
 
-## 先分清两个程序
+## 下载
 
 | 程序 | Windows / Mac 文件名 | 打开后看到什么 | 用途与发布状态 |
 | --- | --- | --- | --- |
-| **Codex 消息助手（电脑聊天版）** | `CodexRelay.exe` / `CodexRelay.app` | 独立聊天窗口，带聊天列表和输入框 | 在电脑上查看和继续已有 Codex 聊天。[独立项目与下载](https://github.com/starmoonmyth/codex-relay-desktop/releases/latest)。 |
-| **Codex 手机消息助手（手机连接服务）** | `CodexRelayMobile.exe` / `CodexRelayMobile.app` | 电脑浏览器打开配对二维码和连接管理页 | 电脑运行服务，让手机通过 Tailscale 网页发送任务、查看回复和接收提醒。**这是当前仓库提供的程序。** |
+| **[电脑聊天版下载](https://github.com/starmoonmyth/codex-relay-desktop/releases/latest)** | `CodexRelay.exe` / `CodexRelay.app` | 独立聊天窗口，带聊天列表和输入框 | 在电脑上查看和继续已有 Codex 文字聊天；[源码](https://github.com/starmoonmyth/codex-relay-desktop)。 |
+| **[手机连接服务下载](https://github.com/starmoonmyth/codex-relay-mobile/releases/latest)** | `CodexRelayMobile.exe` / `CodexRelayMobile.app` | 电脑浏览器打开配对二维码和连接管理页 | 本项目：电脑运行服务，手机通过 Tailscale 网页发送任务、查看回复和接收提醒。 |
 
 想在手机上操作，下载本仓库的 `CodexRelayMobile-*` 发布包；Windows EXE 和 Mac DMG 都安装在**电脑上**。手机访问配对后的网页，iPhone / Android 可将其添加为主屏幕应用（PWA），没有单独的 IPA / APK。
 

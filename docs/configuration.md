@@ -47,7 +47,7 @@ Claude Code 会话来自 `claude_home/projects` 下的 JSONL 文件。发送时�
 
 `CodexRelayMobile.exe` / `CodexRelayMobile.app` 是运行在电脑上的手机连接服务，双击打开配对与连接管理页属于正常行为。用手机扫码后，在手机网页中选择聊天并发送任务。
 
-带聊天列表和输入框的独立电脑程序是 `CodexRelay.exe` / `CodexRelay.app`，当前仓库没有发布该程序的源码或安装包。使用手机连接服务不需要另装这个电脑聊天版。
+带聊天列表和输入框的独立电脑程序是 `CodexRelay.exe` / `CodexRelay.app`，可从 [电脑聊天版 Releases](https://github.com/starmoonmyth/codex-relay-desktop/releases/latest) 下载。使用手机连接服务只需安装官方 Codex 和本项目的连接服务。
 
 ### 手机打不开页面
 
