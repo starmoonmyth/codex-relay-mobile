@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from version import APP_VERSION
+
 import json
 import os
 import queue
@@ -39,7 +41,7 @@ def list_models(cli, home):
             if item.get('id') == identity:
                 return item.get('result', {})
     try:
-        request(1, 'initialize', {'clientInfo': {'name': 'codex_relay_mobile', 'version': '1.3.8-rc.2'}})
+        request(1, 'initialize', {'clientInfo': {'name': 'codex_relay_mobile', 'version': APP_VERSION}})
         write({'method': 'initialized'})
         models, cursor, identity = [], None, 2
         while True:

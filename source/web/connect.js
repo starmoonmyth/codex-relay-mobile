@@ -7,6 +7,7 @@ fetch('/api/local/setup', {cache:'no-store'}).then(async response => {
   const available = data.available || {};
   $('provider-status').textContent = `Codex ${available.codex ? '可用' : '未找到'} · Claude Code ${available.claude ? '可用' : '未找到会话或 CLI'} · Grok ${available.grok ? '可用' : '未找到会话或 CLI'}`;
   $('phone-link').value = data.origin; $('manual-token').value = data.token; $('setup').hidden = false;
+  window.dispatchEvent(new Event('relay-ready'));
 }).catch(error => { $('setup-error').textContent = error.message; $('qr').hidden = true; });
 async function copy(text, button) {
   try { await navigator.clipboard.writeText(text); button.textContent = '已复制'; }

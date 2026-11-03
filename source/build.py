@@ -4,6 +4,8 @@ import platform
 import subprocess
 import sys
 
+from version import APP_VERSION
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -31,8 +33,8 @@ pyz = PYZ(a.pure)
                                 '--out',str(iconset/name)],check=True,capture_output=True)
         icon = work/'Mobile.icns'
         subprocess.run(['/usr/bin/iconutil','-c','icns',str(iconset),'-o',str(icon)],check=True)
-        info = {'CFBundleDisplayName':'Codex 手机消息助手','CFBundleShortVersionString':'1.3.8-rc.2',
-                'CFBundleVersion':'20','LSMinimumSystemVersion':'14.0','LSUIElement':True}
+        info = {'CFBundleDisplayName':'Codex 手机消息助手','CFBundleShortVersionString':APP_VERSION,
+                'CFBundleVersion':'22','LSMinimumSystemVersion':'14.0','LSUIElement':True}
         spec = common + f"""exe = EXE(pyz,a.scripts,[],exclude_binaries=True,name='CodexRelayMobile',console=False,
           target_arch={platform.machine()!r},codesign_identity=None)
 coll = COLLECT(exe,a.binaries,a.datas,name='CodexRelayMobile')

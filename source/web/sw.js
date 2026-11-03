@@ -1,6 +1,6 @@
-const VERSION='1.3.8-rc.2';
+const VERSION='1.3.8-rc.3';
 const CACHE='codex-relay-mobile-v9';
-const SHELL=['/','/style.css','/app.js','/marked.js','/purify.js','/manifest.webmanifest','/icon-192.png','/icon-512.png'];
+const SHELL=['/','/style.css','/app.js','/updates.js','/marked.js','/purify.js','/manifest.webmanifest','/icon-192.png','/icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));
 self.addEventListener('activate',event=>event.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(key=>key.startsWith('codex-relay-mobile-')&&key!==CACHE).map(key=>caches.delete(key)))).then(()=>self.clients.claim())));
 self.addEventListener('fetch',event=>{

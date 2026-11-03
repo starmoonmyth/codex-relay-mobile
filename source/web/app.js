@@ -450,6 +450,7 @@ async function boot() {
     for(const peer of peers) {const option=node('option','',peer.label+(peer.origin===state.meta.origin?' · 此电脑':''));option.value=peer.origin;option.selected=peer.origin===state.meta.origin;$('device').append(option);}
     const parameters=new URLSearchParams(location.search),computer=parameters.get('computer');
     if(computer&&computer!==location.origin){openNotificationChat({source_origin:computer,thread_id:parameters.get('chat')||'',notifications:parameters.has('notifications')});return;}
+    window.dispatchEvent(new Event('relay-ready'));
     drawProviderSelector();
     await loadChats();connection('已连接 · '+state.meta.label,true);
     const target=new URLSearchParams(location.search).get('chat')||storage.get('selected-chat');
@@ -712,7 +713,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.3.8-rc.2'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.8-rc.3'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -738,7 +739,7 @@ async function inspectNotificationWorker() {
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.3.8-rc.2 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.8-rc.3 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }

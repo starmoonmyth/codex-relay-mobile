@@ -19,7 +19,7 @@
 1. 记录用户反馈到 [已知问题](../KNOWN_ISSUES.md)，明确尚未修复的内容。本地验证过的单个场景不能写成全部场景已解决。
 2. 对照上一个公开版本整理一次累计变更，写入 [CHANGELOG](../CHANGELOG.md)。不补造没有实际发布过的版本记录。
 3. 确定公开版本与渠道；存在影响主要功能的已知回归时使用预览版，并保留原稳定版的 Latest 标记。
-4. 统一 `source/build.py`、`source/server.py`、`source/web/app.js`、`source/web/sw.js`、`source/codex_models.py` 的版本。macOS 的 `CFBundleVersion` 使用递增整数。
+4. 将 `source/version.py` 中的 `APP_VERSION`、`PUBLIC_BASELINE` 以及 `source/web/app.js`、`source/web/sw.js` 统一为公开版本。Python 服务、CLI 初始化信息和 Mac 应用版本共用 `APP_VERSION`；macOS 的 `CFBundleVersion` 使用递增整数。本地调试仅递增应用版本，`PUBLIC_BASELINE` 保留其所基于的已公开版本，用于更新检测。
 5. 在不含本机数据的目录中分别构建 Windows 与 macOS。测试使用临时记录和模拟投递，不能向日常聊天注入测试消息。核对内嵌版本、空设备列表、Web 资源、许可证、依赖清单及安装包校验和。
 6. Release 说明写清相对上一公开版的变化、功能限制、已知问题、升级方式与实际验证范围。平台只做过构建时不能声称已经真机端到端验证。
 7. 先创建草稿并上传配套产物，核对文件和标签后发布；预览版同时设置 Pre-release 且不设为 Latest。不替换旧标签或覆盖旧安装包。

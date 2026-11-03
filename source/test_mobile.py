@@ -80,6 +80,20 @@ class MobileTests(unittest.TestCase):
         self.assertEqual(status,200)
         return headers['Set-Cookie'].split(';')[0]
 
+    def test_update_checks_allow_local_or_paired_access_and_validate_manual_origin(self):
+        result = {'current_version': '1.3.16', 'available': False}
+        with mock.patch.object(self.relay.updates, 'check', return_value=result) as check:
+            self.assertEqual(self.request('/api/updates')[0], 200)
+            check.assert_called_with(force=False)
+            self.assertEqual(self.request('/api/updates', {})[0], 200)
+            check.assert_called_with(force=True)
+            self.assertEqual(self.request('/api/updates', {}, origin='https://untrusted.test')[0], 403)
+            remote = {'host': 'example.tailnet.ts.net:8444', 'extra': {'X-Forwarded-Proto': 'https'}}
+            check.reset_mock()
+            self.assertEqual(self.request('/api/updates', **remote)[0], 401)
+            check.assert_not_called()
+            self.assertEqual(self.request('/api/updates', cookie=self.paired(), **remote)[0], 200)
+
     def test_install_names_identify_the_computer_and_escape_html(self):
         self.relay.config['label'] = 'Mac "<&>'
         status, _, raw = self.request('/manifest.webmanifest')

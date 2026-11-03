@@ -4,7 +4,7 @@
 
 ## 发布渠道与已知问题
 
-**最新稳定版为 [1.3.7](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.7)。当前源码对应 [1.3.8-rc.2 预览版](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.8-rc.2)，它累计包含 1.3.7 之后的改动，不会替换稳定版默认下载。** 本地调试编号与公开版本独立；公开安装包的文件名、程序与通知组件使用相同的公开版本，详见 [版本与发布规则](docs/releasing.md)。
+**最新稳定版为 [1.3.7](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.7)，最近公开预览版为 [1.3.8-rc.3](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.8-rc.3)。** `main` 可包含尚未发布的修改，复现安装包请检出对应标签。本地调试编号与公开版本独立；公开安装包的文件名、程序与通知组件使用相同的公开版本，详见 [版本与发布规则](docs/releasing.md)。
 
 **预览验证范围：** 已修订 Grok 停止状态、Claude 桌面历史和压缩后的消息展示；这些场景仍需手机验收。Claude Desktop 新增原生窗口文字代发，Windows 已验证隔离聊天，Mac 的辅助功能代发尚未实机验收。Grok Bot 桌面记录仍为只读。请先阅读 [已知问题与接入边界](KNOWN_ISSUES.md)，不要把预览版理解为完整桌面适配。
 
@@ -54,6 +54,12 @@ Mac 发行包使用本地 ad-hoc 签名，未进行 Apple Developer ID 公证；
 iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中申请权限。开启后先点“测试本机通知”，再点“发送测试通知”。如果本机通知正常、远程推送一直没有手机回执，可点“重新连接系统推送”重建订阅。
 
 推送服务接受请求与手机收到通知是两个阶段，界面会分别显示回执。通知包含电脑名称、聊天标题与状态；点击后通过 Tailscale 返回聊天。电脑需要保持运行并能访问 Apple、Google、Mozilla 或 Microsoft 的推送服务。
+
+## 检查更新
+
+电脑连接页和手机聊天列表底部均有“检查更新”。打开界面后静默查询 GitHub，每台电脑的自动查询结果缓存 24 小时，重启和多台手机共用缓存；手动检查最多每分钟查询一次。发现新版时显示下载入口，手机聊天顶部也会提示需要更新当前电脑的连接服务。网络失败不弹窗，手动检查时显示失败原因。
+
+稳定版只提示新的稳定发布；预览版也检查后续预览及稳定发布。比较依据是这份程序所基于的公开版本，本地调试编号较大不会挡住公开更新。点击入口打开本项目 GitHub Release，由用户选择对应电脑的安装包并更新。
 
 ## Grok CLI 接入
 

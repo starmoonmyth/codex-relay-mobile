@@ -1,0 +1,2 @@
+APP_VERSION = '1.3.8-rc.3'
+PUBLIC_BASELINE = '1.3.8-rc.3'

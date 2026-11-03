@@ -32,6 +32,8 @@ from usage import Usage
 from activity import Activities
 from plan_usage import Plans
 from claude_desktop import deliver_desktop
+from updates import Updates
+from version import APP_VERSION
 
 STATIC = pathlib.Path(__file__).resolve().parent / "web"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -116,6 +118,7 @@ class Relay:
                     receipt.update(status="投递结果待确认", result="uncertain")
                     self.save_receipt(connection, receipt)
         self.notifications = Notifications(self)
+        self.updates = Updates(self.root)
 
     @contextlib.contextmanager
     def connect(self):
@@ -735,7 +738,13 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.notifications.acknowledge(body.get('token'),body.get('stage'),body.get('error','')))
                     return
             if path == "/api/health" and not post:
-                self.response({"app": "CodexRelayMobile", "version": "1.3.8-rc.2", "label": self.relay.config.get("label", socket.gethostname())})
+                self.response({"app": "CodexRelayMobile", "version": APP_VERSION, "label": self.relay.config.get("label", socket.gethostname())})
+                return
+            if path == '/api/updates':
+                if not self.local() and not self.relay.session(self.cookie()):
+                    self.response({'error': '请先配对这台电脑。'}, 401)
+                    return
+                self.response(self.relay.updates.check(force=post))
                 return
             if path.startswith("/api/local/"):
                 if not self.local() or post:
@@ -829,7 +838,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.response({"error": "找不到此操作。"}, 404)
                 return
             name = {"/": "index.html", "/connect": "connect.html", "/app.js": "app.js", "/style.css": "style.css",
-                    "/connect.js": "connect.js", "/manifest.webmanifest": "manifest.webmanifest", "/sw.js": "sw.js",
+                    "/connect.js": "connect.js", "/updates.js": "updates.js", "/manifest.webmanifest": "manifest.webmanifest", "/sw.js": "sw.js",
                     "/icon-192.png": "icon-192.png", "/icon-512.png": "icon-512.png",
                     "/marked.js": "marked.js", "/purify.js": "purify.js"}.get(path)
             if name is None:
