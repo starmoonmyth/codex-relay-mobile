@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import subprocess
 import tempfile
@@ -6,6 +7,8 @@ import unittest
 from unittest import mock
 
 from grok_backend import GrokData, deliver_grok, run_cli, run_status
+from activity import Activities, transcript_activity
+from server import Relay
 
 SESSION = '00000000-0000-4000-8000-000000000001'
 
@@ -53,6 +56,77 @@ class GrokTests(unittest.TestCase):
         with (self.directory / 'updates.jsonl').open('a', encoding='utf-8') as output:
             output.write(json.dumps(update('turn_completed', stop_reason='end_turn')) + '\n')
         self.assertEqual(self.data.turn(chat.id)['status'], 'completed')
+
+    def test_native_terminal_events_and_permissions_follow_current_turn(self):
+        self.write_updates(update('user_message_chunk', 'task', 'user'))
+        events = self.directory / 'events.jsonl'
+        for outcome, expected in [('cancelled', 'interrupted'), ('completed', 'completed'), ('error', 'failed')]:
+            with self.subTest(outcome=outcome):
+                events.write_text(json.dumps({'type': 'turn_ended', 'ts': '1970-01-01T00:02:04Z', 'outcome': outcome}))
+                self.assertEqual(self.data.turn('grok:' + SESSION)['status'], expected)
+                self.assertEqual(transcript_activity(self.data.chats()[0])['state'], expected)
+        events.write_text(json.dumps({'type': 'permission_requested', 'ts': '1970-01-01T00:02:04Z'}))
+        self.assertEqual(self.data.turn('grok:' + SESSION)['status'], 'needsInput')
+        self.assertEqual(transcript_activity(self.data.chats()[0])['state'], 'needs_input')
+        events.write_text(json.dumps({'type': 'turn_ended', 'ts': '1970-01-01T00:02:02Z', 'outcome': 'cancelled'}))
+        self.assertEqual(self.data.turn('grok:' + SESSION)['status'], 'inProgress')
+
+    def test_inactive_session_stops_after_grace_and_cache_refreshes(self):
+        self.write_updates(update('user_message_chunk', 'task', 'user'))
+        chat = self.data.chats()[0]
+        registry = self.home / 'active_sessions.json'
+        registry.write_text('[]')
+        self.assertEqual(self.data.turn(chat.id)['status'], 'inProgress')
+        os.utime(self.directory / 'updates.jsonl', (1, 1))
+        registry.write_text(json.dumps([{'session_id': SESSION, 'pid': os.getpid()}]))
+        activities = Activities()
+        with mock.patch('activity.time.time', return_value=100):
+            self.assertEqual(activities.transcript(chat)['state'], 'working')
+        registry.write_text('[]')
+        with mock.patch('activity.time.time', return_value=108):
+            self.assertEqual(activities.transcript(chat)['state'], 'interrupted')
+        registry.unlink()
+        self.assertEqual(self.data.turn(chat.id)['status'], 'inProgress')
+
+    def test_native_stop_reconciles_mobile_receipt_and_list(self):
+        self.write_updates(update('user_message_chunk', 'task', 'user'))
+        (self.directory / 'events.jsonl').write_text(json.dumps({
+            'type': 'turn_ended', 'ts': '1970-01-01T00:02:04Z', 'outcome': 'cancelled'}))
+        relay = Relay(self.root / 'relay', {'origin': 'http://localhost:8879', 'provider': 'grok', 'grok_home': str(self.home),
+            'codex_home': str(self.root / 'codex'), 'claude_home': str(self.root / 'claude')})
+        chat = relay.grok.chats()[0]
+        receipt = {'id': 'mobile-request', 'thread_id': chat.id, 'text': 'task', 'provider': 'grok',
+            'result': 'sent', 'status': '处理中', 'queue_ids': [], 'sent_at_ms': 122000}
+        with relay.connect() as c:
+            c.execute('INSERT INTO deliveries VALUES (?,?,?,?,?)',
+                (receipt['id'], chat.id, receipt['text'], json.dumps(receipt), 1))
+        value = relay.snapshot(chat.id)
+        self.assertEqual(value['turn']['status'], 'interrupted')
+        self.assertEqual(value['activity']['state'], 'interrupted')
+        self.assertEqual(value['receipts'][0]['status'], '已中断')
+        self.assertTrue(value['receipts'][0]['seen_in_history'])
+
+    def test_successful_mobile_run_completes_only_its_own_native_turn(self):
+        self.write_updates(update('user_message_chunk', 'task', 'user'), update('agent_message_chunk', 'done', 'answer'))
+        relay = Relay(self.root / 'relay', {'origin': 'http://localhost:8879', 'provider': 'grok',
+            'grok_home': str(self.home), 'codex_home': str(self.root / 'codex'), 'claude_home': str(self.root / 'claude')})
+        chat = relay.grok.chats()[0]
+        receipt = {'id': 'mobile-request', 'thread_id': chat.id, 'text': 'task', 'provider': 'grok',
+            'result': 'sent', 'status': '处理中', 'queue_ids': [], 'sent_at_ms': 122000}
+        run = relay.root / 'grok-runs' / receipt['id']
+        run.mkdir(parents=True)
+        (run / 'result.json').write_text('{"ok":true}')
+        with relay.connect() as c:
+            c.execute('INSERT INTO deliveries VALUES (?,?,?,?,?)',
+                (receipt['id'], chat.id, receipt['text'], json.dumps(receipt), 1))
+        value = relay.snapshot(chat.id)
+        self.assertEqual(value['activity']['state'], 'completed')
+        self.assertTrue(value['activity']['visible_completion'])
+        newer = update('user_message_chunk', 'later task', 'later-user')
+        newer['timestamp'] = 130
+        with (self.directory / 'updates.jsonl').open('a') as f:
+            f.write(json.dumps(newer) + '\n')
+        self.assertEqual(relay.snapshot(chat.id)['activity']['state'], 'working')
 
     def test_delivery_uses_prompt_file_and_preserves_model(self):
         cli = self.root / 'fixture-cli'

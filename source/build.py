@@ -15,7 +15,7 @@ def main():
     destination = pathlib.Path(args.destination).resolve()
     work.mkdir(parents=True,exist_ok=True)
     destination.mkdir(parents=True,exist_ok=True)
-    data = [(str(root/'web'),'web'),(str(root/'peers.json'),'.'),(str(root/'licenses'),'licenses')]
+    data = [(str(root/'web'),'web'),(str(root/'peers.json'),'.'),(str(root/'licenses'),'licenses'),(str(root/'native'),'native')]
     common = f"""a = Analysis([{str(root/'launcher.py')!r}],pathex=[{str(root)!r}],binaries=[],datas={data!r},
                  hiddenimports=['qrcode.image.svg'],hookspath=[],hooksconfig={{}},runtime_hooks=[],excludes=[],noarchive=False)
 pyz = PYZ(a.pure)
@@ -31,8 +31,8 @@ pyz = PYZ(a.pure)
                                 '--out',str(iconset/name)],check=True,capture_output=True)
         icon = work/'Mobile.icns'
         subprocess.run(['/usr/bin/iconutil','-c','icns',str(iconset),'-o',str(icon)],check=True)
-        info = {'CFBundleDisplayName':'Codex 手机消息助手','CFBundleShortVersionString':'1.3.8-rc.1',
-                'CFBundleVersion':'14','LSMinimumSystemVersion':'14.0','LSUIElement':True}
+        info = {'CFBundleDisplayName':'Codex 手机消息助手','CFBundleShortVersionString':'1.3.8-rc.2',
+                'CFBundleVersion':'20','LSMinimumSystemVersion':'14.0','LSUIElement':True}
         spec = common + f"""exe = EXE(pyz,a.scripts,[],exclude_binaries=True,name='CodexRelayMobile',console=False,
           target_arch={platform.machine()!r},codesign_identity=None)
 coll = COLLECT(exe,a.binaries,a.datas,name='CodexRelayMobile')

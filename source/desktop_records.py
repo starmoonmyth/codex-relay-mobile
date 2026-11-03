@@ -40,7 +40,7 @@ class ClaudeDesktopRecords:
                     continue
                 identity = item['cliSessionId']
                 # Two desktop views can select different branches of one CLI file.
-                result.setdefault(identity, []).append(item)
+                result.setdefault(identity, []).append(dict(item, _record_path=str(path)))
         return result
 
 

@@ -56,9 +56,15 @@
     <form method="dialog"><button class="dialog-close" aria-label="关闭通知设置">×</button></form>
     <h2>任务通知</h2><p>任务完成、失败、中断，或有新问题需要回复时提醒。覆盖这台电脑的聊天。</p>
     <p id="notification-state" role="status"></p>
+    <section id="notification-install" class="notification-install" hidden>
+      <strong id="notification-install-title">为这台电脑单独添加主屏幕图标</strong>
+      <p class="small">iPhone 的通知权限属于添加到主屏幕的那个地址。从 Windows 图标切到 Mac，并不会给 Mac 授权，即使这里仍显示“主屏幕模式”。</p>
+      <ol class="small"><li>复制下方地址，粘贴到 Safari 打开。</li><li>点 Safari 的“分享 → 添加到主屏幕”。</li><li>从新图标打开，进入“通知 → 开启系统推送”并允许。</li></ol>
+      <label class="small" for="notification-install-url">当前电脑的地址</label><input id="notification-install-url" type="url" readonly aria-label="当前电脑的地址"><button id="copy-notification-url" type="button">复制地址</button><p id="notification-install-status" class="small" role="status"></p>
+    </section>
     <div class="notification-actions"><button id="enable-local">开启页面内提醒</button><button id="enable-push" class="primary">开启系统推送</button><button id="test-local-notification">测试本机通知</button><button id="test-push">发送测试通知</button><button id="disable-notifications">关闭提醒</button></div>
     <p id="notification-diagnostics" class="small" role="status"></p>
-    <p class="small">系统推送可在页面关闭后提醒。iPhone / iPad 需 iOS 16.4 及以上，先添加到主屏幕，再从主屏幕打开并允许通知。Mac 和 Windows 分别开启一次。</p>
+    <p class="small">系统推送可在页面关闭后提醒。配置统一通知入口后，只需保留入口电脑的一个主屏幕图标；其他电脑通过它提醒。独立推送时，iPhone / iPad 需将对应地址添加到主屏幕后允许通知。</p>
     <p class="small">电脑需保持开机，且能连接 Apple、Google、Mozilla 或 Microsoft 的推送服务。通知显示聊天标题和任务状态；点击后通过 Tailscale 返回聊天。桌面命令审批仍需在电脑处理。</p>
   </dialog>
   <div id="notification-toasts" class="notification-toasts" aria-live="polite"></div>

@@ -4,6 +4,7 @@ import contextlib
 import base64
 import dataclasses
 import hashlib
+import html
 import http.cookies
 import io
 import json
@@ -30,6 +31,7 @@ from grok_backend import GrokData, default_grok_home, discover_grok_cli, deliver
 from usage import Usage
 from activity import Activities
 from plan_usage import Plans
+from claude_desktop import deliver_desktop
 
 STATIC = pathlib.Path(__file__).resolve().parent / "web"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
@@ -174,7 +176,7 @@ class Relay:
                   'grok-bot': 'Grok Bot 桌面 · 本地缓存', 'grok-cli': 'Grok CLI'}
         detail = ''
         if chat.source == 'claude-desktop':
-            detail = '按 Claude 桌面选中的消息链显示。请在 Claude 桌面发送；手机不会另起 CLI 写入其他分支。'
+            detail = '通过 Claude 原生输入框发送到此聊天。电脑需解锁并打开 Claude；发送时会切换窗口，已有草稿会阻止代发。当前支持文字。'
         elif chat.source == 'grok-bot':
             detail = '显示 Grok Bot 保存到此电脑的聊天缓存，可能只包含最近部分记录。请在 Grok Bot 中发送。'
         return {'source': chat.source, 'label': labels.get(chat.source, 'Codex'), 'writable': chat.writable,
@@ -196,6 +198,10 @@ class Relay:
         os.replace(temporary, self.config_path)
 
     def claude_model_info(self, chat):
+        if chat.source == 'claude-desktop':
+            return {'selected': '', 'requested_model': '', 'automatic_model': chat.model,
+                    'automatic_source': 'desktop', 'last_response_model': chat.model,
+                    'choices': [], 'native_desktop': True}
         selected = self.config.get("claude_chat_models", {}).get(chat.id, "")
         default = self.config.get("claude_model") or ""
         automatic = default or chat.model
@@ -266,6 +272,8 @@ class Relay:
             chat = self.chat(identity)
             if chat is None or chat.provider != "claude":
                 raise ValueError("请选择一个 Claude Code 聊天。")
+            if chat.source == 'claude-desktop' and model:
+                raise ValueError('桌面代发跟随 Claude 原生模型，请在 Claude 桌面调整。')
             models = self.config.setdefault("claude_chat_models", {})
             if model:
                 models[identity] = model
@@ -431,7 +439,7 @@ class Relay:
             receipt['history_head'] = chat.history_head
             if chat.provider == 'grok':
                 receipt['requested_model'] = validate_model(self.grok_model_info(chat)['requested_model'] if grok_model is None else grok_model)
-            elif chat.provider == "claude":
+            elif chat.provider == "claude" and chat.source != 'claude-desktop':
                 # Pin the model before starting the CLI; desktop UI settings are independent.
                 receipt["requested_model"] = validate_model(
                     self.claude_model_info(chat)["requested_model"] if claude_model is None else claude_model)
@@ -453,6 +461,13 @@ class Relay:
                 if chat.provider == 'grok':
                     result = self.grok_sender(self.grok_cli, self.grok.home, chat, text, request_id,
                         self.root / 'grok-runs', receipt['requested_model'], self.config.get('grok_permission_mode', ''))
+                elif chat.source == 'claude-desktop':
+                    if images:
+                        raise ValueError('Claude 桌面代发当前支持文字，图片请在原生桌面添加。')
+                    if claude_model:
+                        raise ValueError('Claude 桌面代发跟随原生模型，请刷新手机后发送。')
+                    result = deliver_desktop(chat, text, [], request_id, self.root / 'claude-desktop-runs')
+                    receipt['requested_model'] = result.get('requested_model', '')
                 elif chat.provider == "claude":
                     result = self.claude_sender(
                         self.claude_cli, chat, text, [self.image_path(image) for image in images],
@@ -466,7 +481,7 @@ class Relay:
                 receipt["queue_ids"] = result.get("queue_ids", [])
                 receipt['delivery_mode'] = result.get('delivery_mode','queue')
                 if chat.provider == "claude":
-                    receipt['status'] = 'Claude Code 已启动 · 等待回复'
+                    receipt['status'] = 'Claude 桌面已提交 · 等待回执' if chat.source == 'claude-desktop' else 'Claude Code 已启动 · 等待回复'
                 elif chat.provider == 'grok':
                     receipt['status'] = 'Grok 已启动 · 等待回复'
                 if immediate:
@@ -545,7 +560,7 @@ class Relay:
                 if not match and receipt.get('result') == 'sent' and not set(receipt.get('queue_ids', [])) & queue_ids:
                     if not receipt.get('detached'):
                         match = data.historical_receipt_message(receipt)
-                if chat.source == 'claude-desktop' and not match:
+                if chat.source == 'claude-desktop' and not match and receipt.get('delivery_mode') != 'claude-desktop':
                     receipt['detached'] = True
                     receipt['status'] = '不在桌面当前分支'
                     receipt['seen_in_history'] = False
@@ -555,8 +570,10 @@ class Relay:
                     receipt['turn_id'] = match.turn_id
                     if chat.provider == 'grok':
                         activity = self.activities.transcript(chat)
-                        if activity.get('user_message_id') == match.id and activity['state'] == 'completed':
-                            receipt['grok_finished'] = True
+                        if activity.get('user_message_id') == match.id:
+                            receipt['native_status'] = activity['state']
+                            if activity['state'] == 'completed':
+                                receipt['grok_finished'] = True
                 if not receipt.get('detached') and receipt["status"] != "正在投递":
                     receipt["status"] = data.receipt_status(receipt, messages, queue_ids)
                 self.save_receipt(connection, receipt)
@@ -698,6 +715,15 @@ class Handler(BaseHTTPRequestHandler):
                     secure = "; Secure" if not self.local() else ""
                     self.response({"ok": True}, headers={"Set-Cookie": f"relay_session={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{secure}"})
                     return
+                if path.startswith('/api/notification-relay/'):
+                    try:
+                        result = self.relay.notifications.receive_forward(path.rsplit('/', 1)[-1], body,
+                            self.headers.get('Authorization', ''))
+                    except PermissionError:
+                        self.response({'error': '通知转发认证失败。'}, 403)
+                    else:
+                        self.response(result)
+                    return
                 if path == "/api/local/stop" and self.local():
                     self.response({"ok": True})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
@@ -709,7 +735,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.response(self.relay.notifications.acknowledge(body.get('token'),body.get('stage'),body.get('error','')))
                     return
             if path == "/api/health" and not post:
-                self.response({"app": "CodexRelayMobile", "version": "1.3.8-rc.1", "label": self.relay.config.get("label", socket.gethostname())})
+                self.response({"app": "CodexRelayMobile", "version": "1.3.8-rc.2", "label": self.relay.config.get("label", socket.gethostname())})
                 return
             if path.startswith("/api/local/"):
                 if not self.local() or post:
@@ -811,7 +837,16 @@ class Handler(BaseHTTPRequestHandler):
                 return
             mime = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
                     ".css": "text/css; charset=utf-8", ".webmanifest": "application/manifest+json", ".png": "image/png"}[pathlib.Path(name).suffix]
-            self.response((STATIC / name).read_bytes(), mime=mime)
+            raw = (STATIC / name).read_bytes()
+            app_name = 'Codex · ' + str(self.relay.config.get('label') or socket.gethostname())[:60]
+            if name == 'manifest.webmanifest':
+                manifest = json.loads(raw)
+                manifest.update(name=app_name, short_name=app_name)
+                raw = json.dumps(manifest, ensure_ascii=False).encode('utf-8')
+            elif name == 'index.html':
+                raw = raw.decode('utf-8').replace('name="apple-mobile-web-app-title" content="Codex 消息"',
+                    'name="apple-mobile-web-app-title" content="' + html.escape(app_name, quote=True) + '"').encode('utf-8')
+            self.response(raw, mime=mime)
         except (ValueError, TypeError, json.JSONDecodeError) as error:
             self.response({"error": str(error)}, 400)
         except (BrokenPipeError, ConnectionResetError):

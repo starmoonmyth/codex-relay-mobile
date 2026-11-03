@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import time
 
 from backend import Chat, DeliveryError, Message
 from claude_backend import ClaudeData, validate_model
@@ -52,6 +53,77 @@ def event_id(entry, index=0):
     if not any(identity):
         identity.append(index)
     return 'grok-message:' + hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:32]
+
+
+def process_alive(pid):
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5
+        try:
+            code = wintypes.DWORD()
+            return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259)
+        finally:
+            kernel.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def native_turn_state(chat, status, identity=''):
+    """Reconcile update streams with native terminal events and live sessions."""
+    path = pathlib.Path(chat.rollout_path)
+    events = ClaudeData._read(path.with_name('events.jsonl'), max_bytes=256 * 1024)
+    newest_user = 0
+    for entry in ClaudeData._read(path, max_bytes=2 * 1024 * 1024):
+        if ((entry.get('params') or {}).get('update') or {}).get('sessionUpdate') == 'user_message_chunk':
+            newest_user = event_time(entry)
+    waiting = False
+    for event in events:
+        try:
+            stamp = datetime.datetime.fromisoformat(event.get('ts', '').replace('Z', '+00:00')).timestamp() * 1000
+        except ValueError:
+            continue
+        if stamp < newest_user:
+            continue
+        kind = event.get('type')
+        if kind in ('turn_started', 'permission_resolved', 'turn_ended'):
+            waiting = False
+        if kind == 'permission_requested':
+            waiting = True
+        elif kind == 'turn_ended':
+            outcome = str(event.get('outcome') or '').lower()
+            if 'cancel' in outcome or 'interrupt' in outcome or 'abort' in outcome:
+                status = 'interrupted'
+            elif outcome in ('completed', 'success', 'succeeded', 'end_turn'):
+                status = 'completed'
+            elif outcome in ('failed', 'error'):
+                status = 'failed'
+    if status == 'inProgress':
+        registry = path.parents[3] / 'active_sessions.json'
+        active = read_json(registry)
+        if isinstance(active, list):
+            session = chat.id.split(':', 1)[1]
+            alive = any(row.get('session_id') == session and process_alive(row.get('pid'))
+                        for row in active if isinstance(row, dict))
+            recent = max(path.stat().st_mtime, path.with_name('events.jsonl').stat().st_mtime if path.with_name('events.jsonl').exists() else 0)
+            if not alive and time.time() - recent > 10:
+                status = 'interrupted'
+                waiting = False
+    return {'status': 'needsInput' if waiting and status == 'inProgress' else status, 'turn_id': identity}
 
 
 def run_status(directory, session_id):
@@ -177,21 +249,15 @@ class GrokData(ClaudeData):
             elif kind == 'turn_completed':
                 reason = str(update.get('stop_reason', '')).lower()
                 status = 'completed' if reason in ('end_turn', 'endturn') else 'interrupted' if 'cancel' in reason else 'failed'
-        waiting = False
-        for event in self._read(pathlib.Path(chat.rollout_path).with_name('events.jsonl'), max_bytes=128 * 1024):
-            if event.get('type') in ('turn_started', 'permission_resolved', 'turn_ended'):
-                waiting = False
-            elif event.get('type') == 'permission_requested':
-                waiting = True
-        if waiting and status == 'inProgress':
-            status = 'needsInput'
-        return {'status': status, 'turn_id': identity} if status else {}
+        return native_turn_state(chat, status, identity) if status else {}
 
     def receipt_status(self, receipt, messages, queue_ids):
         if receipt.get('result') == 'failed':
             return receipt.get('status', '执行失败')
         if receipt.get('grok_finished'):
             return '已完成'
+        if receipt.get('native_status') in ('interrupted', 'failed', 'needs_input'):
+            return {'interrupted': '已中断', 'failed': '执行失败', 'needs_input': '待你回复'}[receipt['native_status']]
         return '处理中' if self.receipt_message(receipt, messages) else receipt.get('status', '等待接收')
 
 

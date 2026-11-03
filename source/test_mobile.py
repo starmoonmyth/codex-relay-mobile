@@ -80,6 +80,36 @@ class MobileTests(unittest.TestCase):
         self.assertEqual(status,200)
         return headers['Set-Cookie'].split(';')[0]
 
+    def test_install_names_identify_the_computer_and_escape_html(self):
+        self.relay.config['label'] = 'Mac "<&>'
+        status, _, raw = self.request('/manifest.webmanifest')
+        self.assertEqual(status, 200)
+        manifest = json.loads(raw)
+        self.assertEqual(manifest['name'], 'Codex · Mac "<&>')
+        self.assertEqual(manifest['short_name'], manifest['name'])
+        self.assertEqual(manifest['id'], '/')
+        self.assertEqual(manifest['start_url'], '/')
+        status, _, raw = self.request('/')
+        self.assertEqual(status, 200)
+        self.assertIn('content="Codex · Mac &quot;&lt;&amp;&gt;"', raw.decode('utf-8'))
+
+    def test_notification_forward_api_uses_its_own_auth_and_cannot_send_chat_messages(self):
+        source = 'https://mac.example.test'
+        self.relay.config['notification_forward_sources'] = {source: 'fixture-forward-key'}
+        self.relay.config['peers'] = [{'origin': source, 'label': 'Mac'}]
+        body = {'source': source, 'event': {'id': 1, 'thread_id': 'chat-a', 'kind': 'completed',
+            'created': __import__('time').time()}}
+        route = '/api/notification-relay/events'
+        self.assertEqual(self.request(route, body)[0], 403)
+        auth = {'Authorization': 'Bearer fixture-forward-key'}
+        self.assertEqual(self.request(route, body, extra=auth)[0], 200)
+        self.assertEqual(self.request(route, body, extra=auth)[0], 200)
+        self.assertEqual(self.request('/api/notification-relay/send', body, extra=auth)[0], 400)
+        self.assertEqual(self.request('/api/send', {'thread_id': 'chat-a', 'text': 'must not send'}, extra=auth)[0], 401)
+        self.assertEqual(self.calls, [])
+        with self.relay.connect() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM notification_events').fetchone()[0], 1)
+
     def test_usage_requires_pairing_and_valid_chat(self):
         self.assertEqual(self.request('/api/usage/chat-a')[0], 401)
         cookie = self.paired()

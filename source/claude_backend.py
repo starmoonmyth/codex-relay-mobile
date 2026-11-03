@@ -76,7 +76,13 @@ def _text(content) -> str:
 def _entry_text(entry: dict) -> str:
     message = entry.get("message")
     if isinstance(message, dict):
-        return _text(message.get("content"))
+        text = _text(message.get("content"))
+        desktop_intro = '<system-reminder>\nThis conversation is now continuing in the Claude desktop app (Code tab).'
+        if entry.get('type') == 'user' and entry.get('entrypoint') == 'claude-desktop' and text.startswith(desktop_intro):
+            end = text.find('</system-reminder>')
+            if end != -1:
+                text = text[end + len('</system-reminder>'):].lstrip('\r\n')
+        return text
     return _text(entry.get("content"))
 
 
@@ -113,7 +119,7 @@ def _transcript_nodes(path: str, modified: int, size: int):
                     continue
                 if not isinstance(entry, dict) or entry.get('isSidechain'):
                     continue
-                if entry.get('type') not in ('user', 'assistant', 'system'):
+                if not entry.get('uuid') and entry.get('type') not in ('user', 'assistant', 'system'):
                     continue
                 if entry.get('sessionId'):
                     session_id = session_id or entry['sessionId']
@@ -127,6 +133,26 @@ def _transcript_nodes(path: str, modified: int, size: int):
     except OSError:
         return {}, []
     return nodes, legacy
+
+
+def _parent(entry, nodes):
+    parent = entry.get('parentUuid')
+    if entry.get('subtype') == 'compact_boundary':
+        if parent in nodes:
+            return parent
+        logical = entry.get('logicalParentUuid')
+        if logical in nodes:
+            return logical
+        # Claude can omit the last tool node while retaining an explicit
+        # segment of the original branch in the compaction metadata.
+        tail = (entry.get('compactMetadata') or {}).get('preservedSegment', {}).get('tailUuid')
+        if tail in nodes and nodes[tail]['_ordinal'] < entry['_ordinal']:
+            return tail
+    return parent
+
+
+def internal_message(entry):
+    return entry.get('isCompactSummary') is True or entry.get('isMeta') is True
 
 
 def claude_branch(chat):
@@ -148,7 +174,7 @@ def claude_branch(chat):
         visited.add(head)
         entry = nodes[head]
         chain.append(entry)
-        head = entry.get('parentUuid')
+        head = _parent(entry, nodes)
     return list(reversed(chain))
 
 
@@ -232,6 +258,23 @@ class ClaudeData:
                     head = leaf
         return head
 
+    @staticmethod
+    def _desktop_head(path, selected, leaf):
+        if not selected or not leaf or selected == leaf:
+            return selected
+        stat = path.stat()
+        nodes, _ = _transcript_nodes(str(path), stat.st_mtime_ns, stat.st_size)
+        entry = nodes.get(leaf, {})
+        if entry.get('entrypoint') not in (None, 'claude-desktop'):
+            return selected
+        cursor, visited = leaf, set()
+        while cursor and cursor in nodes and cursor not in visited:
+            if cursor == selected:
+                return leaf
+            visited.add(cursor)
+            cursor = _parent(nodes[cursor], nodes)
+        return selected
+
     def chats(self, archived: bool = False) -> list[Chat]:
         result = {}
         desktop = self.desktop.sessions()
@@ -246,7 +289,8 @@ class ClaudeData:
             desktop_head = self._last_prompt_head(path, session_id) if views else ''
             chat = Chat(public_id, view.get('title') or title, view.get('cwd') or cwd, str(path), updated,
                         provider='claude', source=source,
-                        history_head=desktop_head or view.get('lastAssistantUuid') or '', writable=not views)
+                        history_head=self._desktop_head(path, view.get('lastAssistantUuid') or '', desktop_head) if views else '',
+                        writable=not views or bool(view.get('sessionId')))
             # Listing must stay cheap: the full parent chain is resolved only
             # when a specific chat is opened. The tail still gives us a stable
             # head for stale-send detection without reading a large transcript.
@@ -269,7 +313,8 @@ class ClaudeData:
             if len(views) > 1:
                 for view in views:
                     native = replace(chat, id='claude-desktop:' + view['sessionId'], title=view.get('title') or title,
-                        history_head=desktop_head or view.get('lastAssistantUuid') or '', model=view.get('model') or '')
+                        history_head=self._desktop_head(path, view.get('lastAssistantUuid') or '', desktop_head), model=view.get('model') or '',
+                        writable=True)
                     result[native.id] = native
                 continue
             previous = result.get(public_id)
@@ -285,7 +330,7 @@ class ClaudeData:
         for entry in claude_branch(chat):
             ordinal = entry['_ordinal']
             role = entry.get("type")
-            if role not in ("user", "assistant"):
+            if role not in ("user", "assistant") or internal_message(entry):
                 continue
             text = _entry_text(entry)
             # Tool results and empty assistant tool calls are not chat bubbles.

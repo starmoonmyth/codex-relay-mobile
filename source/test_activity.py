@@ -90,6 +90,11 @@ class ActivityTests(unittest.TestCase):
         self.activities.transcript(Chat(**dict(vars(self.chat), provider='claude')))
         self.assertEqual(self.path.read_bytes(), before)
 
+    def test_normal_claude_tool_result_keeps_working(self):
+        self.write([{'type': 'user', 'uuid': 'tool-result', 'toolUseResult': {'stdout': 'done'},
+            'message': {'content': [{'type': 'tool_result', 'content': 'done'}]}}])
+        self.assertEqual(transcript_activity(Chat(**dict(vars(self.chat), provider='claude')))['state'], 'working')
+
 
 if __name__ == '__main__':
     unittest.main()

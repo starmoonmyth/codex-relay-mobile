@@ -1,12 +1,12 @@
 # Codex Relay Mobile · Codex 手机消息助手
 
-通过 Tailscale，在手机上访问 Mac 或 Windows 上已有的 Codex、Claude Code CLI 或 Grok CLI 聊天。电脑负责执行；可写会话支持发送任务，具体图片、选项与通知能力取决于工作台。
+通过 Tailscale，在手机上访问 Mac 或 Windows 上已有的 Codex、Claude Code CLI、Claude Desktop 或 Grok CLI 聊天。电脑负责执行；可写会话支持发送任务，具体图片、选项与通知能力取决于工作台。
 
 ## 发布渠道与已知问题
 
-**最新稳定版为 [1.3.7](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.7)。当前源码对应 [1.3.8-rc.1 预览版](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.8-rc.1)，它是相对 1.3.7 的一次累计更新，不会替换稳定版默认下载。** 本地调试编号与公开版本独立；公开安装包的文件名、程序与通知组件使用相同的公开版本，详见 [版本与发布规则](docs/releasing.md)。
+**最新稳定版为 [1.3.7](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.7)。当前源码对应 [1.3.8-rc.2 预览版](https://github.com/starmoonmyth/codex-relay-mobile/releases/tag/v1.3.8-rc.2)，它累计包含 1.3.7 之后的改动，不会替换稳定版默认下载。** 本地调试编号与公开版本独立；公开安装包的文件名、程序与通知组件使用相同的公开版本，详见 [版本与发布规则](docs/releasing.md)。
 
-**尚未修复：Grok 已停止的对话可能仍显示处理中；Claude Desktop 历史可能为空或不完整。** Claude Desktop、Grok Bot 桌面接入均为只读，不能从手机发送或同步修改桌面模型。请先阅读 [已知问题与接入边界](KNOWN_ISSUES.md)，不要把预览版理解为完整桌面适配。
+**预览验证范围：** 已修订 Grok 停止状态、Claude 桌面历史和压缩后的消息展示；这些场景仍需手机验收。Claude Desktop 新增原生窗口文字代发，Windows 已验证隔离聊天，Mac 的辅助功能代发尚未实机验收。Grok Bot 桌面记录仍为只读。请先阅读 [已知问题与接入边界](KNOWN_ISSUES.md)，不要把预览版理解为完整桌面适配。
 
 ## 下载
 
@@ -21,11 +21,11 @@
 
 文中“Codex 桌面应用”指需要另行安装的 **OpenAI 官方 Codex**，它负责原始聊天和任务执行，与上述两种社区助手分别对应不同程序。完整对应关系见 [程序与下载对照](docs/apps.md)。
 
-这是独立社区项目，与 OpenAI 或 Anthropic 无隶属关系。Codex 路径需要本机 Codex CLI、聊天数据库和桌面内部 IPC；Claude Code 路径读取本机 JSONL 并调用官方 CLI。两类接口都会随桌面版本变化，兼容性不能覆盖所有版本。
+这是独立社区项目，与 OpenAI 或 Anthropic 无隶属关系。Codex 路径需要本机 Codex CLI、聊天数据库和桌面内部 IPC；Claude Code 路径读取本机 JSONL 并调用官方 CLI。Claude Desktop 的文字代发使用系统辅助功能操作原生窗口。这些接口都会随桌面版本变化，兼容性不能覆盖所有版本。
 
 ## 功能
 
-- 查看已有 Codex / Claude Code CLI / Grok CLI 聊天、项目与回复，在所选可写 CLI 会话中继续发送任务；Claude Desktop 与 Grok Bot 桌面记录单独标注，只读能力仍有已知限制。
+- 查看 Codex、Claude Code CLI、Claude Desktop 与 Grok CLI 聊天；可写 CLI 会话支持续聊，Claude Desktop 可通过原生窗口代发文字，Grok Bot 桌面缓存只读。
 - 发送文字、多张图片或图文消息；单张图片最多 8 MB，每条消息图片合计最多 32 MB。
 - 回复结构化提问中的选项或自定义答案，由持有聊天的桌面窗口即时提交。
 - 查看入队、接收、执行中、完成和失败状态，恢复草稿，防止重复提交。
@@ -61,7 +61,7 @@ iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中�
 
 适配读取 `~/.grok/sessions`，使用官方 `--resume` 和显式 `--model` 继续同一个 CLI 会话。Grok Bot 桌面记录会单独标为“Grok Bot 桌面”，按桌面本地缓存读取；它和 Grok CLI 是两套会话，桌面记录只读，手机不会把任务转发到另一套会话。已有任务执行中时会提示等待，避免同时写入一个聊天。CLI 退出失败或返回了其他会话时会显示执行失败。工具权限沿用 Grok 的本机设置；手机暂不处理 Grok 工具审批，需要在电脑处理。
 
-当前 Grok CLI 接入支持文字续聊、模型选择和回复；执行状态仍有 [KI-001](KNOWN_ISSUES.md#待修复)，图片、结构化选项和 Grok 系统推送尚未开放。可用性依据本机 CLI 会话或桌面缓存判断。这条路径不读取或控制 grok.com 的网页聊天。
+当前 Grok CLI 接入支持文字续聊、模型选择和回复；执行状态仍有 [KI-001](KNOWN_ISSUES.md#待验收问题)，图片与结构化选项尚未开放；Grok CLI 已接入状态通知。可用性依据本机 CLI 会话或桌面缓存判断。这条路径不读取或控制 grok.com 的网页聊天。
 
 ## 聊天状态
 
@@ -109,13 +109,13 @@ iPhone / iPad 系统推送需要 iOS 16.4 及以上，并从主屏幕应用中�
 }
 ```
 
-此片段只替换 `peers` 字段，其余自动生成的配置应保留。两台电脑分别扫描配对、分别开启通知。可选 `codex_home` 和 `cli` 字段用于指定非默认 Codex 数据目录或 CLI 路径。电脑连接页和手机侧边栏的“工作台”都可以切换 `Codex`、`Claude Code` 、`Grok` 或全部工作台。
+此片段只替换 `peers` 字段，其余自动生成的配置应保留。两台电脑分别扫描配对。通知可分别订阅，也可配置统一入口，沿用手机的一个主屏幕图标和已有订阅，见 [多电脑共用通知入口](docs/configuration.md#多电脑共用通知入口)。可选 `codex_home` 和 `cli` 字段用于指定非默认 Codex 数据目录或 CLI 路径。电脑连接页和手机侧边栏的“工作台”都可以切换 `Codex`、`Claude Code` 、`Grok` 或全部工作台。
 
 Claude Code 适配读取 `~/.claude/projects`（也可设置 `claude_home`），按 JSONL 会话 ID 调用本机 Claude Code CLI 的 `--resume` 继续原会话。Windows 会自动查找 VS Code Claude Code 扩展内置的 `claude.exe`，Mac 可设置 `claude_cli` 指向已安装的 CLI。Claude Code 的图片会保存为助手附件目录，并在任务中提供给 Claude Code 读取；这条路径不伪造 Claude Desktop 的内部 Electron IPC。
 
-Claude Code 适配现在按 JSONL 的 `parentUuid` 链读取单一分支，并锁定项目目录、CLI 会话 ID 和当前消息头。Claude Desktop 选择的分支会单独标为“Claude 桌面”，手机只读该分支；桌面会话不会再被手机另起 CLI 写入。旧回执如果不属于当前分支会显示在“其他分支”区域，不会改变当前聊天状态。CLI 会话发送前会检查记录来源和消息头发生变化，变化时要求刷新，避免串到另一条记录。
+Claude Code 适配现在按 JSONL 的 `parentUuid` 链读取单一分支，并锁定项目目录、CLI 会话 ID 和当前消息头。Claude Desktop 选择的分支会单独标为“Claude 桌面”；文字通过辅助功能投递到核对过的原生窗口，不交给普通 CLI 另起会话。上下文压缩后的历史沿原生元数据保留的消息链衔接，过滤内部摘要和提示；缺失的原始消息无法凭空恢复。旧回执如果不属于当前分支会显示在“其他分支”区域，不会改变当前聊天状态。CLI 会话发送前会检查记录来源和消息头发生变化，变化时要求刷新，避免串到另一条记录。
 
-在可写的 Claude CLI 聊天输入框上方点击“发送模型”，可按聊天选择模型或填写中转服务支持的完整模型 ID。每次发送明确指定 `--model`。只读的 Claude Desktop 聊天中，该入口只保存助手偏好，不能改变桌面模型，也不启用手机发送。发送消息保留请求模型，回复标注接口报告的模型 ID；没有模型记录时会要求先选择。详见 [模型设置](docs/configuration.md#claude-使用哪个模型手机怎么切换)。
+在可写的 Claude CLI 聊天输入框上方点击“发送模型”，可按聊天选择模型或填写中转服务支持的完整模型 ID。每次发送明确指定 `--model`。Claude Desktop 跟随原生窗口当前模型，手机不能切换该模型；发送回执显示代发时读取的模型名称。发送消息保留请求模型，回复标注接口报告的模型 ID；没有模型记录时会要求先选择。详见 [模型设置](docs/configuration.md#claude-使用哪个模型手机怎么切换)。
 
 更多信息见 [配置与排障](docs/configuration.md)。
 
@@ -153,6 +153,8 @@ python source/build.py --destination dist --work-dir build
 测试使用临时数据目录和模拟投递，不向真实聊天发送消息。需要在目标系统上构建：Windows 生成 EXE，Mac 生成与构建机器架构一致的 `.app`。预构建 Mac 包为 Apple Silicon ARM64。
 
 ## 工作方式和限制
+
+Claude Desktop 代发需要电脑登录、解锁并打开原生 Claude，会切换窗口；原聊天已有草稿、身份不明确或消息链变化时停止代发。Mac 还需允许辅助功能与自动化权限，具体边界见 [已知问题](KNOWN_ISSUES.md)。
 
 服务只读查询 Codex 聊天数据库，通过原生 CLI 队列投递普通消息，通过独立 App Server 投递图片，通过桌面聊天持有窗口的 IPC 提交提问回复。助手自己的配对、上传、通知和回执保存在独立数据目录。
 

@@ -128,12 +128,12 @@ function sameImages(a,b) {return JSON.stringify(a||[])===JSON.stringify(b||[]);}
 function updateSend() {
   if(state.chat)drawTurnStatus(!state.online?'offline':state.busy?'sending':state.lastData?chatStatus(state.lastData):'loading');
   const images=imagesFor(),loading=images.some(image=>image.uploading||image.failed);
-  const modelRequired=['claude','grok'].includes(state.chat?.provider)&&!state.modelInfo?.requested_model;
+  const modelRequired=['claude','grok'].includes(state.chat?.provider)&&!state.modelInfo?.native_desktop&&!state.modelInfo?.requested_model;
   const readOnly=state.chat?.writable===false;
   $('message').disabled=!state.chat||readOnly;
   $('send').disabled=!state.chat||!state.lastData||readOnly||(!$('message').value.trim()&&!images.length)||state.busy||loading||modelRequired||state.modelSaving;
   $('choose-model').disabled=!state.chat||state.busy||state.modelSaving;
-  $('add-image').disabled=!state.chat||readOnly||state.busy||state.chat.provider==='grok';
+  $('add-image').disabled=!state.chat||readOnly||state.busy||state.chat.provider==='grok'||state.chat.source==='claude-desktop';
   $('add-image').title=state.chat?.provider==='grok'?'Grok 当前支持文字续聊':'选择照片或拍照';
   for(const button of $('attachment-drafts').querySelectorAll('button'))button.disabled=state.busy;
 }
@@ -181,6 +181,7 @@ async function prepareImage(file) {
 }
 async function addImages(files) {
   if(!state.chat||state.busy)return;
+  if(state.chat.source==='claude-desktop'){notice('Claude 桌面代发当前支持文字，图片请在原生桌面添加。');return;}
   if(state.chat.provider==='grok'){notice('Grok 当前支持文字续聊，图片投递尚未开放。');return;}
   const chatId=state.chat.id;
   for(const file of Array.from(files)) {
@@ -227,6 +228,7 @@ function renderSnapshot(data, force) {
   state.chat=data.chat;
   $('chat-path').textContent=sourceLabel(data.chat)+' · '+data.chat.cwd;
   $('draft-label').textContent=data.chat.writable===false?'桌面原记录 · 只读查看':'消息将发送到此聊天';
+  if(data.chat.source==='claude-desktop')$('message').placeholder='输入消息，发送到 Claude 原聊天…';
   document.querySelector('.composer-wrap .hint').textContent=data.conversation?.detail||(data.chat.provider==='grok'?'发送到所选 Grok CLI 会话':'图片合计最多 32 MB · 发送后电脑继续工作');
   const listed=state.chats.find(chat=>chat.id===data.chat.id);if(listed&&data.activity)listed.activity=data.activity;
   drawList();
@@ -261,7 +263,7 @@ function renderSnapshot(data, force) {
     for(const receipt of detached){const item=node('article','pending');item.append(node('div','pending-text',receipt.display_text??receipt.text),node('div','small','其他分支 · '+receipt.status));details.append(item);}
     fragment.append(details);
   }
-  if(!fragment.childNodes.length)fragment.append(node('p','small','还没有消息。在下方输入任务，继续这个聊天。'));
+  if(!fragment.childNodes.length)fragment.append(node('p','small',data.chat.writable?'当前未读到正文，可在原生应用核对历史。':'当前未读到这条原生记录的正文，请在桌面应用核对。'));
   const oldTop=box.scrollTop;box.replaceChildren(fragment);
   if(near||force){box.scrollTop=box.scrollHeight;$('jump').hidden=true;} else {box.scrollTop=oldTop;$('jump').hidden=false;}
   markVisibleCompletion();
@@ -394,12 +396,18 @@ function drawModel(info) {
   state.modelInfo=info;
   const visible=!!state.chat;
   $('model-controls').hidden=!visible;
+  if(info?.native_desktop){
+    $('choose-model').textContent='模型：跟随 Claude 桌面';
+    $('last-model').textContent=info.last_response_model?'最近记录：'+info.last_response_model:'发送时核对桌面当前模型';
+    updateSend();return;
+  }
   $('choose-model').textContent=info?.requested_model?(state.chat?.provider==='codex'?'聊天模型：':'发送模型：')+modelLabel(info.requested_model):info?'请选择发送模型':'正在读取模型…';
   $('last-model').textContent=state.chat?.provider==='codex'?(info?.confirmed?'最近与桌面确认 · 下轮生效':'沿用原聊天 · 点击选择'):info?.last_response_model?'最近回复：'+info.last_response_model:'最近回复模型未记录';
   updateSend();
 }
 $('choose-model').onclick=async()=>{
   const id=state.chat?.id,provider=state.chat?.provider;if(!id)return;
+  if(state.modelInfo?.native_desktop){notice('此聊天通过 Claude 原生输入框发送，使用桌面当前模型。请在 Claude 桌面切换模型；发送回执会显示实际模型。');return;}
   const codex=provider==='codex',grok=provider==='grok';
   $('model-title').textContent='这个聊天的 '+(codex?'Codex':grok?'Grok':'Claude')+' 模型';
   $('model-description').textContent=grok?'恢复原 Grok CLI 会话，并在每次发送时明确指定模型。进行中的任务完成后才能继续发送。':codex?'同步修改原聊天下一轮模型，电脑端也会使用这个设置。进行中的回复继续使用原模型。':state.chat?.writable===false?'这是 Claude 桌面原记录；这里可以记录模型偏好，但手机不会把消息写入另一条 CLI 分支。':'从这里发送的任务使用下方模型，修改在下次发送时生效。';
@@ -440,12 +448,14 @@ async function boot() {
     $('device').replaceChildren();
     const peers=state.meta.peers.length?state.meta.peers:[{label:state.meta.label,origin:state.meta.origin}];
     for(const peer of peers) {const option=node('option','',peer.label+(peer.origin===state.meta.origin?' · 此电脑':''));option.value=peer.origin;option.selected=peer.origin===state.meta.origin;$('device').append(option);}
+    const parameters=new URLSearchParams(location.search),computer=parameters.get('computer');
+    if(computer&&computer!==location.origin){openNotificationChat({source_origin:computer,thread_id:parameters.get('chat')||'',notifications:parameters.has('notifications')});return;}
     drawProviderSelector();
     await loadChats();connection('已连接 · '+state.meta.label,true);
     const target=new URLSearchParams(location.search).get('chat')||storage.get('selected-chat');
-    const chat=state.chats.find(c=>c.id===target);
-    if(chat)await selectChat(chat);else drawer(window.innerWidth<=760);
+    if(target)await openChatById(target);else drawer(window.innerWidth<=760);
     await loadNotificationSettings();
+    if(parameters.has('notifications'))$('notification-settings').showModal();
     prepareNotificationWorker().catch(error=>{$('notification-state').textContent=error.message;});
   }catch(error){if($('workspace').hidden){showLogin();$('pair-error').textContent=error.message;}else{connection('连接中断',false);notice(error.message);}}
 }
@@ -579,16 +589,69 @@ function drawNotificationSettings() {
   $('disable-notifications').hidden=!notificationState.enabled;
   $('notifications-button').classList.toggle('enabled',notificationState.enabled);
   $('notification-state').textContent=notificationState.error||(notificationState.push?'系统推送已连接。可点“测试推送”确认手机接收回执。':notificationState.enabled?'页面内提醒已开启；关闭页面后需系统推送。':'提醒尚未开启。');
+  $('notification-state').textContent+=' 通知按电脑独立开启，切换电脑后请分别连接系统推送。';
   if(!supported)$('notification-state').textContent+=' 当前浏览器不支持系统推送；iPhone 请从主屏幕打开。';
+  drawNotificationInstall();
+  if(notificationState.forwarding){
+    const name=notificationState.forwarding.label;
+    $('notification-state').textContent=notificationState.error||`使用 ${name} 已授权的主屏幕通知入口。保留原来的一个图标即可；提醒会标注任务来自哪台电脑。请保持两台电脑及 Tailscale 在线。`;
+    $('enable-local').hidden=true;$('disable-notifications').hidden=true;
+    $('enable-push').disabled=false;$('enable-push').textContent='管理统一通知入口';
+    $('test-local-notification').hidden=true;$('test-push').hidden=!notificationState.push;
+    $('notification-install').hidden=true;
+  }
+}
+function isAppleMobile() {
+  return /iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+}
+function isStandalone() {return matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;}
+function drawNotificationInstall(force=false) {
+  const permission='Notification'in window?Notification.permission:'unsupported';
+  $('notification-install').hidden=!!notificationState.forwarding||!(isAppleMobile()&&(force||permission!=='granted'));
+  $('notification-install-title').textContent='为 '+(state.meta?.label||'当前电脑')+' 单独添加主屏幕图标';
+  $('notification-install-url').value=location.origin+'/';
+}
+function notificationPermissionError(permission) {
+  if(isAppleMobile())return permission==='denied'
+    ?'当前电脑的通知权限已被拒绝。请在 iPhone 设置 → 通知中允许对应的主屏幕应用；若只有 Windows 图标，请按下方步骤单独添加当前电脑。'
+    :'当前电脑尚未获得通知权限。若从 Windows 图标切换到 Mac，请按下方步骤将 Mac 地址单独添加到主屏幕，再从新图标开启通知。';
+  return permission==='denied'?'当前地址的通知权限已被拒绝，请在浏览器网站设置中允许通知。':'尚未获得通知权限，请再次点击开启并允许通知。';
+}
+$('copy-notification-url').onclick=async()=>{
+  const input=$('notification-install-url');
+  try{await navigator.clipboard.writeText(input.value);$('notification-install-status').textContent='已复制。请粘贴到 Safari，再添加到主屏幕。';}
+  catch{input.focus();input.select();input.setSelectionRange(0,input.value.length);$('notification-install-status').textContent='请长按已选地址复制，再粘贴到 Safari。';}
+};
+async function openChatById(identity) {
+  let chat=state.chats.find(chat=>chat.id===identity);
+  if(!chat){
+    const provider=identity.startsWith('claude:')||identity.startsWith('claude-desktop:')?'claude':identity.startsWith('grok:')||identity.startsWith('grok-bot:')?'grok':'codex';
+    if(state.meta.provider!==provider&&state.meta.provider!=='all'){
+      Object.assign(state.meta,await api('/api/provider',{provider}));drawProviderSelector();
+    }
+    await loadChats();chat=state.chats.find(chat=>chat.id===identity);
+  }
+  if(chat)await selectChat(chat);else{drawer(true);notice('未找到这条聊天，请在原生应用核对是否已归档。');}
+}
+function openNotificationChat(value) {
+  const origin=value.source_origin;
+  if(origin&&origin!==location.origin){
+    if(!state.meta.peers.some(peer=>peer.origin===origin))throw Error('通知来自未配置的电脑，请在电脑端检查连接。');
+    const url=new URL('/',origin);if(value.thread_id)url.searchParams.set('chat',value.thread_id);
+    if(value.notifications)url.searchParams.set('notifications','1');
+    location.assign(url.href);return;
+  }
+  if(value.thread_id)return openChatById(value.thread_id);
 }
 function showTaskNotification(value) {
   if(value.created&&Date.now()/1000-value.created>120)return;
   const container=$('notification-toasts');
-  for(const previous of container.children)if(previous.dataset.thread===value.thread_id)previous.remove();
+  const identity=(value.source_origin||location.origin)+'|'+value.thread_id;
+  for(const previous of container.children)if(previous.dataset.thread===identity)previous.remove();
   const item=node('div','notification-toast'),open=node('button','',value.title+' · '+value.body.replace('，点击查看。','')),close=node('button','toast-close','×');
-  item.dataset.thread=value.thread_id;
+  item.dataset.thread=identity;
   close.setAttribute('aria-label','关闭提醒');close.onclick=()=>item.remove();
-  open.onclick=async()=>{item.remove();const chat=state.chats.find(chat=>chat.id===value.thread_id);if(chat)await selectChat(chat);else{await loadChats();const current=state.chats.find(chat=>chat.id===value.thread_id);if(current)await selectChat(current);}};
+  open.onclick=async()=>{item.remove();try{await openNotificationChat(value);}catch(error){notice(error.message);}};
   item.append(open,close);container.append(item);
   while(container.children.length>2)container.firstElementChild.remove();
   setTimeout(()=>item.remove(),7000);
@@ -605,10 +668,13 @@ async function pollNotifications() {
 $('notifications-button').onclick=()=>{$('notification-settings').showModal();Promise.all([loadNotificationSettings(),inspectNotificationWorker()]).catch(error=>$('notification-state').textContent=error.message);};
 $('enable-local').onclick=async()=>{try{Object.assign(notificationState,await api('/api/notifications',{enabled:true}));drawNotificationSettings();}catch(error){$('notification-state').textContent=error.message;}};
 $('enable-push').onclick=async()=>{
+  if(notificationState.forwarding){openNotificationChat({source_origin:notificationState.forwarding.origin,notifications:true});return;}
   const button=$('enable-push');button.disabled=true;
   try {
-    const permission=await Notification.requestPermission();
-    if(permission!=='granted')throw Error('未获得通知权限，请在系统或浏览器设置中允许通知。');
+    if(isAppleMobile()&&!isStandalone())throw Error('请先按下方步骤将当前电脑添加到主屏幕，再从新图标开启通知。');
+    if(!('Notification'in window))throw Error('当前浏览器不支持系统通知，请从主屏幕图标打开。');
+    const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
+    if(permission!=='granted')throw Error(notificationPermissionError(permission));
     const registration=await currentNotificationWorker();
     const raw=notificationState.public_key.replace(/-/g,'+').replace(/_/g,'/');
     const applicationServerKey=Uint8Array.from(atob(raw+'='.repeat((4-raw.length%4)%4)),c=>c.charCodeAt(0));
@@ -617,17 +683,19 @@ $('enable-push').onclick=async()=>{
     const subscription=await registration.pushManager.subscribe({userVisibleOnly:true,applicationServerKey});
     Object.assign(notificationState,await api('/api/notifications',{enabled:true,subscription:subscription.toJSON()}));drawNotificationSettings();
     await inspectNotificationWorker();
-  }catch(error){$('notification-state').textContent=error.message;button.disabled=false;}
+  }catch(error){$('notification-state').textContent=error.message;drawNotificationInstall(true);inspectNotificationWorker().catch(()=>{});}
+  finally{button.disabled=!('Notification'in window&&'PushManager'in window&&'serviceWorker'in navigator&&window.isSecureContext);}
 };
 $('test-push').onclick=async()=>{const button=$('test-push');button.disabled=true;try{
   await inspectNotificationWorker();
   const result=await api('/api/notifications/test',{});
+  if(result.forwarded){$('notification-state').textContent='测试提醒已加入统一入口的推送队列。请退到主屏幕查看通知；无需为当前电脑另行授权。';return;}
   $('notification-state').textContent='推送服务已接受；正在等待手机接收回执…可以退到主屏幕查看通知。';
   notificationState.testing=result.delivery_id;
   await checkDelivery(result.delivery_id);
 }catch(error){$('notification-state').textContent=error.message;}finally{button.disabled=false;}};
 $('disable-notifications').onclick=async()=>{try{Object.assign(notificationState,await api('/api/notifications',{enabled:false}));drawNotificationSettings();if('serviceWorker'in navigator){const registration=await navigator.serviceWorker.getRegistration();const subscription=await registration?.pushManager?.getSubscription();if(subscription)await subscription.unsubscribe();}}catch(error){$('notification-state').textContent=error.message;}};
-navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type==='open-chat'){const chat=state.chats.find(chat=>chat.id===event.data.thread_id);if(chat)selectChat(chat);}});
+navigator.serviceWorker?.addEventListener('message',event=>{if(event.data?.type==='open-chat')Promise.resolve().then(()=>openNotificationChat(event.data)).catch(error=>notice(error.message));});
 document.addEventListener('visibilitychange',()=>{if(!document.hidden)pollNotifications();});
 setInterval(pollNotifications,4000);
 
@@ -644,7 +712,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.3.8-rc.1'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.8-rc.2'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -652,6 +720,7 @@ async function currentNotificationWorker() {
 async function prepareNotificationWorker() {
   if(!('serviceWorker'in navigator)||!window.isSecureContext)return;
   const registration=await currentNotificationWorker();
+  if(notificationState.forwarding){await inspectNotificationWorker();return;}
   if('Notification'in window&&Notification.permission==='granted'&&registration.pushManager){
     const subscription=await registration.pushManager.getSubscription();
     if(subscription){
@@ -665,11 +734,11 @@ async function prepareNotificationWorker() {
   await inspectNotificationWorker();
 }
 async function inspectNotificationWorker() {
-  const standalone=matchMedia('(display-mode: standalone)').matches||navigator.standalone===true;
+  const standalone=isStandalone();
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.3.8-rc.1 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.8-rc.2 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }

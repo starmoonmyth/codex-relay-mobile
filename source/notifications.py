@@ -8,6 +8,7 @@ import re
 import sqlite3
 import threading
 import time
+import secrets
 from urllib.parse import urlsplit
 
 
@@ -53,7 +54,85 @@ class Notifications:
                 );
                 CREATE TABLE IF NOT EXISTS notification_clients (session TEXT PRIMARY KEY, info TEXT, updated INTEGER);
                 CREATE TABLE IF NOT EXISTS notification_dedup (identity TEXT PRIMARY KEY, created INTEGER);
+                CREATE TABLE IF NOT EXISTS notification_forward_cursor (origin TEXT PRIMARY KEY, cursor INTEGER);
             ''')
+            target = self.forward_target()
+            if target:
+                c.execute('INSERT OR IGNORE INTO notification_forward_cursor SELECT ?,COALESCE(MAX(id),0) FROM notification_events',
+                          (target['origin'],))
+
+    def forward_target(self):
+        target = self.relay.config.get('notification_forward')
+        if not isinstance(target, dict):
+            return None
+        origin = target.get('origin')
+        if origin == self.relay.origin or not any(peer.get('origin') == origin for peer in self.relay.config.get('peers', [])):
+            return None
+        return target if target.get('key') else None
+
+    def forward_request(self, action, **body):
+        import requests
+        target = self.forward_target()
+        if not target:
+            raise ValueError('未配置通知转发入口。')
+        try:
+            with requests.Session() as session:
+                session.trust_env = False
+                response = session.post(target['origin'] + '/api/notification-relay/' + action,
+                    headers={'Origin': target['origin'], 'Authorization': 'Bearer ' + target['key']},
+                    json=dict(body, source=self.relay.origin), timeout=(3, 5), allow_redirects=False)
+                if response.status_code != 200:
+                    raise ValueError('通知入口暂不可用，请保持入口电脑与 Tailscale 在线。')
+                return response.json()
+        except requests.RequestException as error:
+            raise ValueError('无法连接通知入口，请保持入口电脑与 Tailscale 在线。') from error
+
+    def receive_forward(self, action, body, authorization):
+        source = body.get('source')
+        keys = self.relay.config.get('notification_forward_sources') or {}
+        expected = keys.get(source) if isinstance(source, str) else None
+        if not isinstance(expected, str) or not expected or not secrets.compare_digest(authorization, 'Bearer ' + expected):
+            raise PermissionError('通知转发认证失败。')
+        peer = next((p for p in self.relay.config.get('peers', []) if p.get('origin') == source), None)
+        if not peer:
+            raise PermissionError('未配对的通知来源。')
+        if action == 'status':
+            with self.relay.connect() as c:
+                count = c.execute("SELECT COUNT(*) FROM notification_devices d JOIN sessions s ON d.session=s.hash "
+                    "WHERE d.enabled=1 AND d.subscription!='' AND s.expires>?", (time.time(),)).fetchone()[0]
+            return {'enabled': bool(count), 'push': bool(count), 'label': self.relay.config.get('label') or '通知入口'}
+        event = body.get('event') or {}
+        if action == 'test':
+            event = {'id': 'test-' + secrets.token_hex(16), 'kind': 'test', 'thread_id': '',
+                'created': time.time(), 'chat_title': peer.get('label') or '远程电脑'}
+        elif action != 'events':
+            raise ValueError('不支持的通知转发操作。')
+        if not isinstance(event, dict) or event.get('kind') not in ('completed', 'failed', 'interrupted', 'needs_input', 'test'):
+            raise ValueError('通知状态无效。')
+        identity, thread, title = event.get('id'), event.get('thread_id'), event.get('chat_title', '')
+        created = event.get('created')
+        if (not isinstance(identity, (str, int)) or not 0 < len(str(identity)) <= 100 or
+                not isinstance(thread, str) or len(thread) > 300 or not isinstance(title, str) or len(title) > 180 or
+                not isinstance(created, (int, float)) or not time.time() - 3600 <= created <= time.time() + 60):
+            raise ValueError('通知内容无效或已过期。')
+        dedup = 'forward:' + hashlib.sha256(source.encode()).hexdigest() + ':' + str(identity)
+        with self.relay.connect() as c:
+            cursor = self.event(c, thread, event['kind'], dedup, title, source, peer.get('label') or '远程电脑')
+        return {'ok': True, 'queued': bool(cursor)}
+
+    def send_forwarded(self):
+        target = self.forward_target()
+        if not target:
+            return
+        with self.relay.connect() as c:
+            cursor = c.execute('SELECT cursor FROM notification_forward_cursor WHERE origin=?', (target['origin'],)).fetchone()[0]
+            rows = c.execute('SELECT id,payload,created FROM notification_events WHERE id>? ORDER BY id LIMIT 30', (cursor,)).fetchall()
+        for row in rows:
+            payload = dict(json.loads(row['payload']), id=row['id'])
+            if row['created'] > time.time() - 3600 and not payload.get('source_origin'):
+                self.forward_request('events', event=payload)
+            with self.relay.connect() as c:
+                c.execute('UPDATE notification_forward_cursor SET cursor=? WHERE origin=?', (row['id'], target['origin']))
 
     @staticmethod
     def session_hash(cookie):
@@ -82,10 +161,19 @@ class Notifications:
             client = c.execute('SELECT info FROM notification_clients WHERE session=?', (self.session_hash(cookie),)).fetchone()
             receipt = c.execute('SELECT id,kind,created,provider,provider_status,received,shown,clicked,error FROM notification_receipts WHERE session=? ORDER BY created DESC,rowid DESC LIMIT 1',
                                 (self.session_hash(cookie),)).fetchone()
-        return {'enabled': bool(row and row['enabled']), 'push': bool(row and row['subscription']),
+        value = {'enabled': bool(row and row['enabled']), 'push': bool(row and row['subscription']),
                 'error': (row['error'] if row else '') or self.last_error, 'cursor': cursor,
                 'client': json.loads(client[0]) if client else None, 'last_delivery': dict(receipt) if receipt else None,
                 'public_key': self.public_key()}
+        target = self.forward_target()
+        if target:
+            value['forwarding'] = {'origin': target['origin'], 'label': target.get('label') or '通知入口'}
+            try:
+                remote = self.forward_request('status')
+                value.update(enabled=remote['enabled'], push=remote['push'], error=self.last_error)
+            except ValueError as error:
+                value.update(enabled=True, push=False, error=str(error))
+        return value
 
     @staticmethod
     def validate_subscription(value):
@@ -114,6 +202,8 @@ class Notifications:
         return {'endpoint': endpoint, 'keys': {'p256dh': keys['p256dh'], 'auth': keys['auth']}}
 
     def configure(self, cookie, enabled, subscription=None):
+        if self.forward_target():
+            raise ValueError('这台电脑使用统一通知入口，请在入口电脑的通知设置中管理。')
         if not isinstance(enabled, bool):
             raise ValueError('通知设置无效。')
         subscription = self.validate_subscription(subscription) if subscription is not None else None
@@ -210,6 +300,19 @@ class Notifications:
         return identity
 
     def capture(self):
+        states = self.capture_codex()
+        for data in (self.relay.claude, self.relay.grok):
+            chats = data.chats()
+            activities = self.relay.activities.read(self.relay, chats)
+            for chat in chats:
+                value = activities[chat.id]
+                status = {'working': 'inProgress', 'needs_input': 'needsInput'}.get(value['state'], value['state'])
+                identity = value.get('completion_id') or value.get('turn_id') or value.get('message_id') or chat.history_head
+                states[chat.id] = {'turn': [identity, status] if identity else [],
+                    'questions': [identity] if status == 'needsInput' and identity else [], 'title': chat.title}
+        return states
+
+    def capture_codex(self):
         data = self.relay.data
         if not data.database('thread_history'):
             return {}
@@ -266,16 +369,19 @@ class Notifications:
         identities.extend(f'{thread}:question:{item}' for item in state['questions'])
         return identities
 
-    def event(self, c, thread, kind, identity=None, chat_title=''):
+    def event(self, c, thread, kind, identity=None, chat_title='', source_origin='', source_label=''):
         if identity and not c.execute('INSERT OR IGNORE INTO notification_dedup VALUES (?,?)', (identity, int(time.time()))).rowcount:
             return None
         title = {'completed': '任务已完成', 'failed': '任务执行失败', 'interrupted': '任务已中断',
                  'needs_input': '有问题需要你回复', 'test': '通知测试'}[kind]
-        payload = {'title': 'Codex · ' + (self.relay.config.get('label') or '电脑'),
+        provider = 'Claude' if thread.startswith(('claude:', 'claude-desktop:')) else 'Grok' if thread.startswith(('grok:', 'grok-bot:')) else 'Codex'
+        payload = {'title': provider + ' · ' + (source_label or self.relay.config.get('label') or '电脑'),
                    'body': (chat_title[:80] + ' · ' if chat_title else '') + title + '，点击查看。',
                    'chat_title': chat_title, 'created': int(time.time()), 'thread_id': thread, 'kind': kind}
+        if source_origin:
+            payload['source_origin'] = source_origin
         cursor = c.execute('INSERT INTO notification_events(thread_id,kind,payload,created) VALUES (?,?,?,?)',
-                           (thread, kind, json.dumps(payload, ensure_ascii=False), int(time.time())))
+                           ((source_origin + ':' if source_origin else '') + thread, kind, json.dumps(payload, ensure_ascii=False), int(time.time())))
         return cursor.lastrowid
 
     def poll(self, cookie, after):
@@ -285,10 +391,10 @@ class Notifications:
             raise ValueError('通知游标无效。') from error
         with self.relay.connect() as c:
             device = c.execute('SELECT * FROM notification_devices WHERE session=?', (self.session_hash(cookie),)).fetchone()
-            if not device or not device['enabled']:
+            if not self.forward_target() and (not device or not device['enabled']):
                 return {'events': [], 'cursor': after}
             rows = c.execute('SELECT id,payload FROM notification_events WHERE id>? ORDER BY id LIMIT 100',
-                             (max(after, device['enabled_after']),)).fetchall()
+                             (max(after, device['enabled_after'] if device else 0),)).fetchall()
         return {'events': [dict(json.loads(row['payload']), id=row['id']) for row in rows],
                 'cursor': rows[-1]['id'] if rows else after}
 
@@ -331,6 +437,9 @@ class Notifications:
                     c.execute('UPDATE notification_devices SET push_cursor=?,error=? WHERE session=?', (row['id'], '', device['session']))
 
     def test(self, cookie):
+        if self.forward_target():
+            self.forward_request('test')
+            return {'ok': True, 'forwarded': True}
         with self.relay.connect() as c:
             row = c.execute('SELECT * FROM notification_devices WHERE session=? AND enabled=1', (self.session_hash(cookie),)).fetchone()
         if not row or not row['subscription']:
@@ -347,10 +456,13 @@ class Notifications:
                 try:
                     with self.relay.connect() as c:
                         enabled = c.execute('SELECT 1 FROM notification_devices WHERE enabled=1 LIMIT 1').fetchone()
-                    if enabled:
+                    if enabled or self.forward_target():
                         with self.lock:
                             self.collect()
-                        self.send_pushes()
+                        if self.forward_target():
+                            self.send_forwarded()
+                        else:
+                            self.send_pushes()
                     self.last_error = ''
                 except (OSError, sqlite3.Error, ValueError, KeyError, TypeError):
                     self.last_error = '暂时无法读取任务状态，通知服务正在重试。'

@@ -29,13 +29,13 @@
 
 Claude Code 会话来自 `claude_home/projects` 下的 JSONL 文件。发送时使用 `claude --resume <session-id> --print`，在后台继续原会话，手机收到的回执以该 JSONL 中的新用户消息和助手消息为准。Claude Code 的图片会放在助手自己的附件目录，并将绝对路径写入任务文本，由 Claude Code 的图片读取能力处理。Claude Desktop 的 `LocalSessions_$_sendMessage` 是内部 Electron IPC，未被外部助手直接调用。
 
-可写适配复用 Claude Code CLI 的会话恢复能力。Claude Desktop 有自己的会话索引、分支、连接器和窗口状态；识别出的桌面会话在手机只读，禁止转交普通 CLI 另起分支。桌面历史读取仍可能为空或不完整，见 [KI-002](../KNOWN_ISSUES.md#待修复)。不要将 CLI 执行成功视为桌面已同步，也不要因手机未显示内容重复发送。
+Claude Code CLI 复用官方会话恢复能力。Claude Desktop 有自己的会话索引、分支、连接器和窗口状态；桌面文字使用系统辅助功能投递到核对过的原生窗口，跟随该窗口的模型。电脑须登录、解锁并打开 Claude，Mac 还需授权辅助功能和自动化；Mac 原生代发尚未实机验收。原聊天有草稿或身份、消息链变化时停止投递。历史限制见 [KI-002](../KNOWN_ISSUES.md#待验收问题)，不要因手机未显示内容重复发送。
 
 ### Claude 使用哪个模型，手机怎么切换
 
 进入可写的 Claude CLI 聊天，点击输入框上方的“发送模型”，选择 Opus、Sonnet、Haiku，或填写服务商支持的完整模型 ID。选择按聊天保存在当前电脑上，下次发送时生效，不会修改电脑 Claude Code 的全局默认模型。
 
-Claude Desktop 聊天是只读的：同一个模型入口仅记录助手偏好，不会同步修改桌面模型，也不代表能够从手机发送。桌面模型请在 Claude Desktop 中设置。
+Claude Desktop 文字代发跟随原生窗口当前模型，手机不提供桌面模型切换；请在电脑 Claude Desktop 中选择。回执保留代发时读取的模型名称，不使用 CLI 的模型偏好覆盖它。桌面图片暂未支持。
 
 没有保存选择时，优先使用本助手的 `claude_model` 配置，否则沿用会话最近一次回复记录中的模型；没有可用模型记录时必须先选择。每次发送都明确传入 `--model`，不启用自动备用模型参数。重复查询同一条请求保留原请求的模型选择。
 
@@ -49,7 +49,41 @@ Claude Desktop 聊天是只读的：同一个模型入口仅记录助手偏好�
 
 此适配只读取 Grok 的会话记录和模型名称，任务交给官方 CLI，不复制登录凭证，也不改写 Grok 聊天文件。后台执行使用独立监督进程记录 CLI 的退出结果，服务停止后已经提交的 Grok 任务仍可继续。图片和手机工具审批尚未开放。
 
-Grok Bot 桌面聊天从独立本地缓存读取，标为只读，不会转交给 Grok CLI。Grok 已停止任务仍可能显示处理中，见 [KI-001](../KNOWN_ISSUES.md#待修复)；以桌面实际状态为准。
+Grok Bot 桌面聊天从独立本地缓存读取，标为只读，不会转交给 Grok CLI。Grok 已停止任务仍可能显示处理中，见 [KI-001](../KNOWN_ISSUES.md#待验收问题)；以桌面实际状态为准。
+
+## 多电脑共用通知入口
+
+例如手机已在 Windows 地址的主屏幕应用中开启系统推送，希望 Mac 也使用同一个图标接收通知：
+
+1. 两台电脑均更新到支持通知转发的版本，并在各自 `peers` 中列入对方的完整 HTTPS 地址。入口 Windows 需已有有效手机推送订阅，手机仍需分别配对两台电脑以访问聊天。
+2. 生成一个专用随机密钥，例如在任一电脑执行 `python -c "import secrets; print(secrets.token_urlsafe(32))"`。将下面两处占位值替换为同一个新密钥，只保存到本机配置。
+3. 停止两台助手，保留其他配置字段，向 Mac 的 `config.json` 合并：
+
+```json
+{
+  "notification_forward": {
+    "origin": "https://your-pc.your-tailnet.ts.net:8444",
+    "label": "Windows",
+    "key": "REPLACE_WITH_YOUR_RANDOM_KEY"
+  }
+}
+```
+
+向入口 Windows 的 `config.json` 合并：
+
+```json
+{
+  "notification_forward_sources": {
+    "https://your-mac.your-tailnet.ts.net:8444": "REPLACE_WITH_YOUR_RANDOM_KEY"
+  }
+}
+```
+
+4. 重启两台助手。手机从原 Windows 主屏幕图标进入，切到 Mac，在“通知”中确认统一入口并发送测试通知。通知会标明来源电脑，点击返回对应聊天，无需第二个主屏幕图标或 Mac 地址的手机通知授权。
+
+入口电脑和任务电脑都需保持运行、Tailscale 在线。转发密钥只能提交状态通知，不能调用聊天发送接口；不要公开本机配置。转发会向入口电脑所有有效且已开启的手机订阅广播来源状态和聊天标题，请仅配置可信设备。需要停用时停止服务后删除双方对应转发配置再重启；原入口订阅保留。
+
+独立订阅模式下，iOS 各地址的主屏幕应用仍需分别授权，跨电脑切换不会继承权限。
 
 ## 常见问题
 

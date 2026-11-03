@@ -56,7 +56,7 @@ class ConversationIdentityTests(unittest.TestCase):
         self.desktop_view()
         data = ClaudeData(self.home, [self.desktop])
         chat = data.chats()[0]
-        self.assertFalse(chat.writable)
+        self.assertTrue(chat.writable)
         self.assertEqual(chat.source, 'claude-desktop')
         self.assertEqual([m.text for m in data.history(chat)], ['shared', 'desktop answer'])
         self.assertEqual(transcript_activity(chat)['message_id'], 'desk')
@@ -65,10 +65,74 @@ class ConversationIdentityTests(unittest.TestCase):
 
     def test_desktop_latest_last_prompt_overrides_stale_assistant_metadata(self):
         self.desktop_view('desk')
+        self.entries.append(self.message('desktop-next', 'desk', 'user', 'next desktop task'))
+        self.write()
+        with self.path.open('a', encoding='utf-8') as handle:
+            handle.write(json.dumps({'type': 'last-prompt', 'leafUuid': 'desktop-next', 'sessionId': 'session'}) + '\n')
+        data = ClaudeData(self.home, [self.desktop])
+        self.assertEqual(data.chats()[0].history_head, 'desktop-next')
+
+    def test_attachment_parent_links_preserve_history_and_exclude_siblings(self):
+        self.entries.extend([
+            {'type': 'attachment', 'uuid': 'bridge', 'parentUuid': 'desk', 'sessionId': 'session'},
+            self.message('final', 'bridge', 'assistant', 'final answer')])
+        self.write()
+        self.desktop_view('final')
+        data = ClaudeData(self.home, [self.desktop])
+        self.assertEqual([m.text for m in data.history(data.chats()[0])], ['shared', 'desktop answer', 'final answer'])
+
+    def test_last_prompt_on_sibling_branch_does_not_replace_desktop_selection(self):
+        self.desktop_view('desk')
         with self.path.open('a', encoding='utf-8') as handle:
             handle.write(json.dumps({'type': 'last-prompt', 'leafUuid': 'phone-answer', 'sessionId': 'session'}) + '\n')
         data = ClaudeData(self.home, [self.desktop])
-        self.assertEqual(data.chats()[0].history_head, 'phone-answer')
+        self.assertEqual(data.chats()[0].history_head, 'desk')
+
+    def test_compaction_keeps_original_history_and_hides_internal_messages(self):
+        self.entries.extend([
+            dict(self.message('boundary', None, 'system', ''), subtype='compact_boundary', logicalParentUuid='desk'),
+            dict(self.message('summary', 'boundary', 'user', 'Internal compaction summary'),
+                 isCompactSummary=True, isVisibleInTranscriptOnly=True),
+            dict(self.message('meta', 'summary', 'user', 'Internal tool instructions'), isMeta=True),
+            self.message('new-user', 'meta', 'user', 'phone task after compaction'),
+            self.message('new-reply', 'new-user', 'assistant', 'reply after compaction')])
+        self.write()
+        self.desktop_view('new-reply')
+        data = ClaudeData(self.home, [self.desktop])
+        chat = data.chats()[0]
+        self.assertEqual([m.text for m in data.history(chat)],
+                         ['shared', 'desktop answer', 'phone task after compaction', 'reply after compaction'])
+        self.assertEqual(transcript_activity(chat)['state'], 'completed')
+        self.assertEqual(transcript_activity(dataclasses.replace(chat, history_head='meta'))['state'], 'completed')
+        self.assertEqual(ClaudeData._desktop_head(self.path, 'desk', 'new-user'), 'new-user')
+
+    def test_compaction_missing_logical_node_uses_only_explicit_preserved_segment(self):
+        self.entries.extend([
+            dict(self.message('boundary', None, 'system', ''), subtype='compact_boundary', logicalParentUuid='missing-tool',
+                 compactMetadata={'preservedSegment': {'tailUuid': 'desk'}}),
+            dict(self.message('summary', 'boundary', 'user', 'summary'), isCompactSummary=True),
+            self.message('new-reply', 'summary', 'assistant', 'new reply')])
+        self.write()
+        self.desktop_view('new-reply')
+        data = ClaudeData(self.home, [self.desktop])
+        self.assertEqual([m.text for m in data.history(data.chats()[0])], ['shared', 'desktop answer', 'new reply'])
+        self.entries[-3]['compactMetadata']['preservedSegment']['tailUuid'] = 'missing-tail'
+        self.write()
+        self.assertEqual([m.text for m in data.history(data.chats()[0])], ['new reply'])
+
+    def test_repeated_compaction_preserves_user_text_that_looks_like_summary(self):
+        self.entries.extend([
+            dict(self.message('boundary1', None, 'system', ''), subtype='compact_boundary', logicalParentUuid='desk'),
+            dict(self.message('summary1', 'boundary1', 'user', 'summary 1'), isCompactSummary=True),
+            self.message('actual-user', 'summary1', 'user', 'This session is being continued from a previous conversation'),
+            self.message('reply1', 'actual-user', 'assistant', 'first reply'),
+            dict(self.message('boundary2', None, 'system', ''), subtype='compact_boundary', logicalParentUuid='reply1'),
+            dict(self.message('summary2', 'boundary2', 'user', 'summary 2'), isCompactSummary=True),
+            self.message('reply2', 'summary2', 'assistant', 'second reply')])
+        self.write()
+        self.desktop_view('reply2')
+        data = ClaudeData(self.home, [self.desktop])
+        self.assertEqual([m.id for m in data.history(data.chats()[0])], ['root', 'desk', 'actual-user', 'reply1', 'reply2'])
 
     def test_interrupted_tool_use_is_not_reported_as_working(self):
         self.desktop_view('desk')
@@ -89,17 +153,36 @@ class ConversationIdentityTests(unittest.TestCase):
             self.desktop_view(head)
             self.assertEqual(data.history(data.chats()[0]), [])
 
-    def test_desktop_session_cannot_be_sent_to_cli_even_through_api(self):
+    def test_desktop_send_routes_to_native_owner_and_matches_receipt(self):
         self.desktop_view()
         relay = Relay(self.root / 'relay', {'origin': 'http://localhost:8879', 'provider': 'claude',
             'claude_home': str(self.home), 'codex_home': str(self.root / 'codex')})
         relay.claude = ClaudeData(self.home, [self.desktop])
-        with patch.object(relay, 'claude_sender') as sender:
-            with self.assertRaisesRegex(ValueError, 'Claude 桌面'):
-                relay.send('claude:session', 'new task', 'blocked-desktop-request')
+        with patch.object(relay, 'claude_sender') as sender, patch('server.deliver_desktop', return_value={
+                'delivery_mode': 'claude-desktop', 'requested_model': 'Opus fixture'}) as native:
+            receipt = relay.send('claude:session', 'new task', 'native-desktop-request')
             sender.assert_not_called()
+            self.assertEqual(native.call_args.args[0].source, 'claude-desktop')
+            self.assertEqual(receipt['delivery_mode'], 'claude-desktop')
+            self.assertEqual(receipt['result'], 'sent')
+            self.assertFalse(relay.snapshot('claude:session')['receipts'][0].get('detached', False))
         with relay.connect() as connection:
-            self.assertEqual(connection.execute('SELECT COUNT(*) FROM deliveries').fetchone()[0], 0)
+            self.assertEqual(connection.execute('SELECT COUNT(*) FROM deliveries').fetchone()[0], 1)
+        with self.assertRaisesRegex(ValueError, '桌面管理'):
+            deliver_claude('fixture', relay.chat('claude:session'), 'task', [], 'request', model='opus')
+
+    def test_desktop_first_native_prompt_matches_original_delivery(self):
+        self.desktop_view('native-reply')
+        intro = '<system-reminder>\nThis conversation is now continuing in the Claude desktop app (Code tab).\nNative instructions\n</system-reminder>\n\n\n'
+        native = dict(self.message('native-user', 'desk', 'user', intro + 'phone task'), entrypoint='claude-desktop')
+        self.entries.extend([native, self.message('native-reply', 'native-user', 'assistant', 'received')])
+        self.write()
+        data = ClaudeData(self.home, [self.desktop])
+        history = data.history(data.chats()[0])
+        self.assertEqual(history[-2].text, 'phone task')
+        receipt = {'text': 'phone task', 'baseline_ids': ['root', 'desk'], 'result': 'sent'}
+        self.assertEqual(data.receipt_message(receipt, history).id, 'native-user')
+        self.assertEqual(data.receipt_status(receipt, history, set()), '已完成')
 
     def test_off_branch_receipt_is_detached_and_does_not_change_desktop_status(self):
         self.desktop_view()
