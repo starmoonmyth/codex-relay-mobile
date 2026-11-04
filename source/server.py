@@ -14,6 +14,7 @@ import re
 import secrets
 import socket
 import sqlite3
+import sys
 import threading
 import time
 import urllib.parse
@@ -38,11 +39,18 @@ from version import APP_VERSION
 STATIC = pathlib.Path(__file__).resolve().parent / "web"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
+SESSION_SECONDS = 30 * 86400
 IMAGE_MIMES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp"}
 IMAGE_SUFFIX = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
 
 
 def mobile_state():
+    if '--data-dir' in sys.argv:
+        return pathlib.Path(sys.argv[sys.argv.index('--data-dir') + 1]).expanduser().resolve()
+    if os.name == 'nt' and getattr(sys, 'frozen', False):
+        installed = pathlib.Path(sys.executable).resolve().parent
+        if installed.name == 'App' and (installed.parent / 'config.json').is_file():
+            return installed.parent
     return state_dir() / "Mobile"
 
 
@@ -135,6 +143,13 @@ class Relay:
             return bool(connection.execute("SELECT 1 FROM sessions WHERE hash=? AND expires>?",
                         (hashlib.sha256(value.encode()).hexdigest(), time.time())).fetchone())
 
+    def renew_session(self, value):
+        now = time.time()
+        with self.connect() as connection:
+            return bool(connection.execute('UPDATE sessions SET expires=? WHERE hash=? AND expires>? AND expires<?',
+                (now + SESSION_SECONDS, hashlib.sha256(value.encode()).hexdigest(), now,
+                 now + SESSION_SECONDS - 86400)).rowcount)
+
     def pair(self, token, client):
         now = time.time()
         with self.lock:
@@ -150,7 +165,7 @@ class Relay:
         with self.connect() as connection:
             connection.execute("DELETE FROM sessions WHERE expires<=?", (now,))
             connection.execute("INSERT INTO sessions VALUES (?,?)",
-                               (hashlib.sha256(value.encode()).hexdigest(), now + 30 * 86400))
+                               (hashlib.sha256(value.encode()).hexdigest(), now + SESSION_SECONDS))
         return value
 
     def chat(self, identity):
@@ -670,6 +685,17 @@ class Handler(BaseHTTPRequestHandler):
         except http.cookies.CookieError:
             return ""
 
+    def session(self):
+        value = self.cookie()
+        valid = self.relay.session(value)
+        if valid and self.relay.renew_session(value):
+            self.renew_cookie = True
+        return valid
+
+    def session_cookie(self, value):
+        secure = '; Secure' if not self.local() else ''
+        return f'relay_session={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_SECONDS}{secure}'
+
     def response(self, value, status=200, mime="application/json; charset=utf-8", headers=None):
         raw = json.dumps(value, ensure_ascii=False).encode() if mime.startswith("application/json") else value
         self.send_response(status)
@@ -681,6 +707,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
+        if getattr(self, 'renew_cookie', False) and 'Set-Cookie' not in (headers or {}):
+            self.send_header('Set-Cookie', self.session_cookie(self.cookie()))
         self.end_headers()
         self.wfile.write(raw)
 
@@ -691,6 +719,7 @@ class Handler(BaseHTTPRequestHandler):
         self.route(True)
 
     def route(self, post):
+        self.renew_cookie = False
         self.connection.settimeout(55)
         if self.headers.get("Host") not in self.relay.hosts:
             self.response({"error": "Host 不受信任。"}, 403)
@@ -701,7 +730,7 @@ class Handler(BaseHTTPRequestHandler):
                 if self.headers.get("Origin") != (self.relay.local_origin if self.local() else self.relay.origin):
                     self.response({"error": "来源校验失败，请从手机连接地址重新打开。"}, 403)
                     return
-                if path == "/api/upload" and not self.relay.session(self.cookie()):
+                if path == "/api/upload" and not self.session():
                     self.response({"error": "请先配对这台电脑。"}, 401)
                     return
                 if self.headers.get_content_type() != "application/json":
@@ -715,8 +744,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("请求格式无效。")
                 if path == "/api/pair":
                     value = self.relay.pair(body.get("token"), self.headers.get("Tailscale-User-Login", "local"))
-                    secure = "; Secure" if not self.local() else ""
-                    self.response({"ok": True}, headers={"Set-Cookie": f"relay_session={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000{secure}"})
+                    self.response({"ok": True}, headers={"Set-Cookie": self.session_cookie(value)})
                     return
                 if path.startswith('/api/notification-relay/'):
                     try:
@@ -728,6 +756,7 @@ class Handler(BaseHTTPRequestHandler):
                         self.response(result)
                     return
                 if path == "/api/local/stop" and self.local():
+                    (self.relay.root / 'service.paused').touch()
                     self.response({"ok": True})
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
                     return
@@ -741,7 +770,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.response({"app": "CodexRelayMobile", "version": APP_VERSION, "label": self.relay.config.get("label", socket.gethostname())})
                 return
             if path == '/api/updates':
-                if not self.local() and not self.relay.session(self.cookie()):
+                if not self.local() and not self.session():
                     self.response({'error': '请先配对这台电脑。'}, 401)
                     return
                 self.response(self.relay.updates.check(force=post))
@@ -752,8 +781,12 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 link = self.relay.origin + "/#pair=" + self.relay.token
                 if path == "/api/local/setup":
+                    try:
+                        startup = json.loads((self.relay.root / 'startup.json').read_text('utf-8'))
+                    except (OSError, ValueError):
+                        startup = {}
                     self.response({"link": link, "origin": self.relay.origin, "label": self.relay.config.get("label"),
-                                   "token": self.relay.token, **self.relay.provider_info()})
+                                   "token": self.relay.token, 'startup': startup, **self.relay.provider_info()})
                 elif path == "/api/local/qr.svg":
                     import qrcode
                     import qrcode.image.svg
@@ -764,7 +797,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.response({"error": "找不到此操作。"}, 404)
                 return
             if path.startswith("/api/"):
-                if not self.relay.session(self.cookie()):
+                if not self.session():
                     self.response({"error": "请先配对这台电脑。"}, 401)
                     return
                 if path == "/api/logout" and post:

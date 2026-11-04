@@ -82,6 +82,27 @@ def _entry_text(entry: dict) -> str:
             end = text.find('</system-reminder>')
             if end != -1:
                 text = text[end + len('</system-reminder>'):].lstrip('\r\n')
+        origin = entry.get('origin') or {}
+        if (entry.get('type') == 'user' and entry.get('entrypoint') == 'claude-desktop' and
+                entry.get('promptSource') == 'sdk' and isinstance(origin, dict) and origin.get('kind') == 'human'):
+            def context_block(match):
+                body = match.group(1).lstrip()
+                try:
+                    payload, end = json.JSONDecoder().raw_decode(body)
+                except ValueError:
+                    return match.group(0)
+                if (not isinstance(payload, dict) or not isinstance(payload.get('context'), dict) or
+                        "The JSON line above is this viewer's live state" not in body[end:]):
+                    return match.group(0)
+                return ''
+            # SDK viewer state is attached to human prompts; retain the text
+            # around it and leave quoted examples in fenced code untouched.
+            pieces = re.split(r'(?ms)(^```[^\n]*\n.*?^```[^\n]*(?:\n|$)|^~~~[^\n]*\n.*?^~~~[^\n]*(?:\n|$))', text)
+            pattern = r'(?ms)^<artifact-view-context\s+artifact="[a-fA-F0-9-]{36}">\s*(.*?)^</artifact-view-context>[ \t]*(?:\r?\n)?'
+            cleaned = ''.join(piece if index % 2 else re.sub(pattern, context_block, piece)
+                              for index, piece in enumerate(pieces))
+            if cleaned != text:
+                text = cleaned.strip()
         return text
     return _text(entry.get("content"))
 
@@ -152,7 +173,16 @@ def _parent(entry, nodes):
 
 
 def internal_message(entry):
-    return entry.get('isCompactSummary') is True or entry.get('isMeta') is True
+    if entry.get('isCompactSummary') is True or entry.get('isMeta') is True:
+        return True
+    if entry.get('type') != 'user':
+        return False
+    origin = entry.get('origin') or {}
+    if isinstance(origin, dict) and origin.get('kind') == 'task-notification':
+        return True
+    message = entry.get('message') or {}
+    raw = _text(message.get('content')) if isinstance(message, dict) else ''
+    return bool(raw.strip() and not _entry_text(entry).strip())
 
 
 def claude_branch(chat):

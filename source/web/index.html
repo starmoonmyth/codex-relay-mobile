@@ -9,11 +9,17 @@
   <script src="/marked.js" defer></script><script src="/purify.js" defer></script><script src="/updates.js" defer></script><script src="/app.js" defer></script>
 </head>
 <body>
+  <section id="reconnect" class="login" hidden aria-live="polite">
+    <div class="appmark">⌘</div><h1>正在连接电脑</h1>
+    <p id="reconnect-status">正在恢复原有连接…</p>
+    <p class="small">请确认电脑已开机、未休眠，手机和电脑的 Tailscale 在线。服务恢复后会自动进入，不需要重新扫码或添加图标。</p>
+    <button id="retry-connection" class="primary" type="button">立即重试</button>
+  </section>
   <section id="login" class="login" hidden>
     <div class="appmark">⌘</div><h1>把任务交给电脑</h1>
     <p>在手机上继续你的 Codex 聊天。</p>
     <form id="pair-form"><label for="token">电脑配对码</label><input id="token" type="password" autocomplete="off" required placeholder="扫描电脑连接页上的二维码，也可粘贴配对码"><button class="primary" type="submit">连接这台电脑</button></form>
-    <p class="small">手机与电脑需连接同一个 Tailscale 网络。<br>配对后，可将此页面添加到手机主屏幕。</p>
+    <p class="small">手机与电脑需连接同一个 Tailscale 网络。<br>重新配对仍可使用原主屏幕图标，不用重复添加。</p>
     <p id="pair-error" role="alert"></p>
   </section>
   <div id="workspace" class="workspace" hidden>

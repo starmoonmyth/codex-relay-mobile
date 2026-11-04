@@ -9,7 +9,8 @@
       panel.querySelector('[data-update-version]').textContent = `版本 ${value.current_version}`;
       panel.querySelector('[data-update-status]').textContent = value.error ?
         (value.available ? `上次查询发现新版 ${value.latest_version}${manual ? '；本次检查暂不可用' : ''}` : manual ? value.error : '') :
-        value.available ? `发现新版 ${value.latest_version}` : value.latest_version ? '已是当前渠道最新版本' : '';
+        value.available ? `发现新版 ${value.latest_version}` : value.latest_version ?
+          (value.current_version === value.public_baseline ? '已是当前渠道最新版本' : `本地构建已包含公开版 ${value.public_baseline}`) : '';
       const link = panel.querySelector('[data-update-link]');
       link.hidden = !value.available && !(manual && value.error);
       link.href = value.release_url;

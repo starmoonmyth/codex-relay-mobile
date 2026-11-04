@@ -83,22 +83,67 @@ def process_alive(pid):
         return False
 
 
-def native_turn_state(chat, status, identity=''):
+def reverse_records(path):
+    try:
+        with path.open('rb') as handle:
+            position = handle.seek(0, 2)
+            remainder = b''
+            while position:
+                size = min(position, 64 * 1024)
+                position -= size
+                handle.seek(position)
+                lines = (handle.read(size) + remainder).split(b'\n')
+                remainder = lines[0]
+                for line in reversed(lines[1:]):
+                    try:
+                        entry = json.loads(line)
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if isinstance(entry, dict):
+                        yield entry
+            try:
+                entry = json.loads(remainder)
+            except (ValueError, UnicodeDecodeError):
+                return
+            if isinstance(entry, dict):
+                yield entry
+    except OSError:
+        return
+
+
+def current_turn_updates(path):
+    """Find the current user turn even when tool output exceeds the display window."""
+    entries = []
+    for entry in reverse_records(path):
+        params = entry.get('params') or {}
+        update, meta = params.get('update') or {}, params.get('_meta') or {}
+        kind = update.get('sessionUpdate')
+        entries.append({'timestamp': entry.get('timestamp'), 'params': {
+            'update': {key: update[key] for key in ('sessionUpdate', 'stop_reason', 'prompt_id') if key in update},
+            '_meta': {key: meta[key] for key in ('eventId', 'promptId', 'streamStartMs', 'agentTimestampMs') if key in meta}}})
+        if kind == 'user_message_chunk':
+            break
+    return list(reversed(entries))
+
+
+def native_turn_state(chat, status, identity='', newest_user=None):
     """Reconcile update streams with native terminal events and live sessions."""
     path = pathlib.Path(chat.rollout_path)
-    events = ClaudeData._read(path.with_name('events.jsonl'), max_bytes=256 * 1024)
-    newest_user = 0
-    for entry in ClaudeData._read(path, max_bytes=2 * 1024 * 1024):
-        if ((entry.get('params') or {}).get('update') or {}).get('sessionUpdate') == 'user_message_chunk':
-            newest_user = event_time(entry)
-    waiting = False
-    for event in events:
+    if newest_user is None:
+        newest_user = next((event_time(entry) for entry in current_turn_updates(path)
+            if ((entry.get('params') or {}).get('update') or {}).get('sessionUpdate') == 'user_message_chunk'), 0)
+    events = []
+    for event in reverse_records(path.with_name('events.jsonl')):
         try:
             stamp = datetime.datetime.fromisoformat(event.get('ts', '').replace('Z', '+00:00')).timestamp() * 1000
         except ValueError:
             continue
         if stamp < newest_user:
-            continue
+            break
+        if event.get('type') in ('turn_started', 'permission_resolved', 'permission_requested', 'turn_ended'):
+            events.append(event)
+    waiting = False
+    for event in reversed(events):
         kind = event.get('type')
         if kind in ('turn_started', 'permission_resolved', 'turn_ended'):
             waiting = False
@@ -238,18 +283,19 @@ class GrokData(ClaudeData):
             return {}
         if chat.source == 'grok-bot':
             return {}
-        status, identity = '', ''
-        for index, entry in enumerate(self._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024)):
+        status, identity, newest_user = '', '', 0
+        for index, entry in enumerate(current_turn_updates(pathlib.Path(chat.rollout_path))):
             params = entry.get('params') or {}
             update = params.get('update') or {}
             kind = update.get('sessionUpdate')
             if kind == 'user_message_chunk':
                 status = 'inProgress'
                 identity = event_id(entry, index)
+                newest_user = event_time(entry)
             elif kind == 'turn_completed':
                 reason = str(update.get('stop_reason', '')).lower()
                 status = 'completed' if reason in ('end_turn', 'endturn') else 'interrupted' if 'cancel' in reason else 'failed'
-        return native_turn_state(chat, status, identity) if status else {}
+        return native_turn_state(chat, status, identity, newest_user) if status else {}
 
     def receipt_status(self, receipt, messages, queue_ids):
         if receipt.get('result') == 'failed':

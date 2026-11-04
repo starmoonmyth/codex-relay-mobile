@@ -57,6 +57,50 @@ class GrokTests(unittest.TestCase):
             output.write(json.dumps(update('turn_completed', stop_reason='end_turn')) + '\n')
         self.assertEqual(self.data.turn(chat.id)['status'], 'completed')
 
+    def test_long_running_turn_keeps_state_after_user_and_permission_leave_display_window(self):
+        old_user = update('user_message_chunk', 'previous task', 'old-user')
+        old_user['timestamp'] = 100
+        old_end = update('turn_completed', 'old answer', 'old-end', stop_reason='end_turn')
+        old_end['timestamp'] = 101
+        self.write_updates(old_user, old_end, update('user_message_chunk', 'long task', 'user'),
+            update('agent_message_chunk', 'progress report', 'progress'),
+            update('tool_call_update', '大' * 800000, 'tool'),
+            update('agent_thought_chunk', 'continuing', 'thought'))
+        registry = self.home / 'active_sessions.json'
+        registry.write_text(json.dumps([{'session_id': SESSION, 'pid': os.getpid()}]))
+        events = self.directory / 'events.jsonl'
+        events.write_text(json.dumps({'type': 'turn_ended', 'ts': '1970-01-01T00:01:41Z', 'outcome': 'completed'}) + '\n' +
+            json.dumps({'type': 'permission_requested', 'ts': '1970-01-01T00:02:04Z'}) + '\n' +
+            json.dumps({'type': 'phase_changed', 'ts': '1970-01-01T00:02:05Z', 'padding': 'x' * 300000}) + '\n')
+        chat = self.data.chats()[0]
+        activities = Activities()
+        self.assertEqual(self.data.turn(chat.id)['status'], 'needsInput')
+        self.assertEqual(activities.transcript(chat)['state'], 'needs_input')
+        with events.open('a') as handle:
+            handle.write(json.dumps({'type': 'permission_resolved', 'ts': '1970-01-01T00:02:06Z'}) + '\n')
+        self.assertEqual(self.data.turn(chat.id)['status'], 'inProgress')
+        self.assertEqual(transcript_activity(chat)['state'], 'working')
+        self.assertEqual(transcript_activity(chat)['completion_id'], '')
+        with events.open('a') as handle:
+            handle.write(json.dumps({'type': 'turn_ended', 'ts': '1970-01-01T00:02:07Z', 'outcome': 'cancelled'}) + '\n')
+        self.assertEqual(self.data.turn(chat.id)['status'], 'interrupted')
+        self.assertEqual(transcript_activity(chat)['state'], 'interrupted')
+        with (self.directory / 'updates.jsonl').open('a') as handle:
+            handle.write(json.dumps(update('turn_completed', stop_reason='end_turn')) + '\n')
+        with events.open('a') as handle:
+            handle.write(json.dumps({'type': 'turn_ended', 'ts': '1970-01-01T00:02:08Z', 'outcome': 'completed'}) + '\n')
+        self.assertEqual(self.data.turn(chat.id)['status'], 'completed')
+        self.assertEqual(transcript_activity(chat)['state'], 'completed')
+
+    def test_reverse_state_reader_ignores_partial_tail_and_handles_utf8_blocks(self):
+        self.write_updates(update('user_message_chunk', 'task', 'user'),
+            update('agent_message_chunk', '进度' * 40000, 'progress'))
+        with (self.directory / 'updates.jsonl').open('a') as handle:
+            handle.write('{"params":')
+        chat = self.data.chats()[0]
+        self.assertEqual(self.data.turn(chat.id)['status'], 'inProgress')
+        self.assertEqual(transcript_activity(chat)['state'], 'working')
+
     def test_native_terminal_events_and_permissions_follow_current_turn(self):
         self.write_updates(update('user_message_chunk', 'task', 'user'))
         events = self.directory / 'events.jsonl'

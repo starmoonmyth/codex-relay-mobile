@@ -134,6 +134,56 @@ class ConversationIdentityTests(unittest.TestCase):
         data = ClaudeData(self.home, [self.desktop])
         self.assertEqual([m.id for m in data.history(data.chats()[0])], ['root', 'desk', 'actual-user', 'reply1', 'reply2'])
 
+    def desktop_prompt(self, identity, parent, text, origin='human'):
+        return dict(self.message(identity, parent, 'user', text), entrypoint='claude-desktop',
+                    origin={'kind': origin}, promptSource='sdk' if origin == 'human' else 'system')
+
+    def artifact_context(self):
+        return ('<artifact-view-context artifact="00000000-0000-4000-8000-000000000001">\n'
+                '{"context":{"mode":"canvas","page":null}}\n'
+                "(The JSON line above is this viewer's live state in the artifact.)\n"
+                '</artifact-view-context>\n')
+
+    def test_desktop_context_retains_human_text_before_and_after_block(self):
+        self.entries.extend([
+            self.desktop_prompt('human', 'desk', 'before\n' + self.artifact_context() + 'after'),
+            self.message('answer', 'human', 'assistant', 'reply')])
+        self.write()
+        self.desktop_view('answer')
+        data = ClaudeData(self.home, [self.desktop])
+        history = data.history(data.chats()[0])
+        self.assertEqual([m.id for m in history], ['root', 'desk', 'human', 'answer'])
+        self.assertEqual(history[-2].text, 'before\nafter')
+        self.assertEqual(data.receipt_message({'text': 'before\nafter', 'baseline_ids': ['root', 'desk']}, history).id, 'human')
+
+    def test_system_task_notifications_and_context_only_prompts_do_not_become_user_turns(self):
+        self.desktop_view('desk')
+        data = ClaudeData(self.home, [self.desktop])
+        original = transcript_activity(data.chats()[0])
+        self.entries.extend([
+            self.desktop_prompt('task', 'desk', '<task-notification>internal task</task-notification>', 'task-notification'),
+            self.desktop_prompt('viewer', 'task', self.artifact_context())])
+        self.write()
+        self.desktop_view('viewer')
+        chat = data.chats()[0]
+        self.assertEqual([m.id for m in data.history(chat)], ['root', 'desk'])
+        self.assertEqual(transcript_activity(chat)['state'], 'completed')
+        self.assertEqual(transcript_activity(chat)['completion_id'], original['completion_id'])
+
+    def test_literal_markup_and_code_examples_remain_visible(self):
+        quoted = '```xml\n' + self.artifact_context() + '```\n'
+        literal = '<artifact-view-context artifact="example">user XML</artifact-view-context>'
+        self.entries.extend([
+            self.desktop_prompt('code', 'desk', quoted),
+            self.desktop_prompt('xml', 'code', literal),
+            self.desktop_prompt('literal-task', 'xml', '<task-notification>explain this XML</task-notification>'),
+            self.message('answer', 'literal-task', 'assistant', self.artifact_context())])
+        self.write()
+        self.desktop_view('answer')
+        data = ClaudeData(self.home, [self.desktop])
+        history = data.history(data.chats()[0])
+        self.assertEqual([m.text for m in history][-4:], [quoted, literal, '<task-notification>explain this XML</task-notification>', self.artifact_context()])
+
     def test_interrupted_tool_use_is_not_reported_as_working(self):
         self.desktop_view('desk')
         self.entries.extend([

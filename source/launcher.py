@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import pathlib
 import shutil
@@ -12,6 +14,7 @@ import time
 import webbrowser
 
 from server import HTTPServer, Relay, mobile_state
+from startup import installed_root, install
 
 
 def run(command):
@@ -101,7 +104,24 @@ def service_lock(root):
 
 
 def main():
-    root = mobile_state()
+    root = installed_root(mobile_state())
+    root.mkdir(parents=True, exist_ok=True)
+    log = logging.getLogger('codex-relay-service')
+    log.setLevel(logging.INFO)
+    handler = RotatingFileHandler(root / 'service.log', maxBytes=512 * 1024, backupCount=2, encoding='utf-8')
+    handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
+    log.addHandler(handler)
+    explicit = '--background' not in sys.argv or '--enable-startup' in sys.argv
+    if explicit:
+        (root / 'service.paused').unlink(missing_ok=True)
+        if getattr(sys, 'frozen', False):
+            try:
+                install(root)
+            except Exception as error:
+                log.exception('登录启动注册失败')
+                (root / 'startup.json').write_text(json.dumps({'enabled': False, 'error': str(error)}), 'utf-8')
+    elif (root / 'service.paused').exists():
+        return
     config_path = root / "config.json"
     config = json.loads(config_path.read_text("utf-8")) if config_path.exists() else {}
     local = f"http://127.0.0.1:{config.get('port', 8879)}"
@@ -112,7 +132,7 @@ def main():
             command = [sys.executable]
             if not getattr(sys, "frozen", False):
                 command.append(str(pathlib.Path(__file__).resolve()))
-            command.append("--background")
+            command.extend(['--background', '--data-dir', str(root)])
             environment = dict(os.environ, PYINSTALLER_RESET_ENVIRONMENT="1")
             subprocess.Popen(command, env=environment, stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -126,6 +146,7 @@ def main():
                 return
             config = config if config.get("origin") else configure(root)
             server = HTTPServer(Relay(root, config))
+            log.info('服务启动 pid=%s origin=%s data=%s', os.getpid(), config['origin'], root)
             (root / "启动说明.html").unlink(missing_ok=True)
             if "--background" not in sys.argv:
                 threading.Timer(0.8, webbrowser.open, args=(local + "/connect",)).start()
@@ -133,8 +154,15 @@ def main():
                 server.serve_forever(poll_interval=0.3)
             finally:
                 server.server_close()
+                log.info('服务正常结束 pid=%s paused=%s', os.getpid(), (root / 'service.paused').exists())
     except Exception as error:
+        log.exception('服务启动或运行失败')
         error_page(root, error)
+        return 1
+    finally:
+        log.removeHandler(handler)
+        handler.close()
+    return 0
 
 
 if __name__ == "__main__":
@@ -145,4 +173,4 @@ if __name__ == "__main__":
         from grok_backend import run_cli
         run_cli(sys.argv[-1])
     else:
-        main()
+        sys.exit(main())

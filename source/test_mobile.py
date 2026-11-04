@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -79,6 +80,40 @@ class MobileTests(unittest.TestCase):
         status, headers, _ = self.request('/api/pair',{'token':self.relay.token})
         self.assertEqual(status,200)
         return headers['Set-Cookie'].split(';')[0]
+
+    def test_pairing_survives_restart_renews_on_use_and_does_not_revive_expired_sessions(self):
+        cookie = self.paired()
+        value = cookie.split('=', 1)[1]
+        old_token = self.relay.token
+        with self.relay.connect() as c:
+            c.execute('UPDATE sessions SET expires=?', (time.time() + 86400,))
+        restarted = Relay(self.relay.root, self.config)
+        self.assertEqual(restarted.token, old_token)
+        self.assertTrue(restarted.session(value))
+        remote = {'host': 'example.tailnet.ts.net:8444', 'extra': {'X-Forwarded-Proto': 'https'}}
+        status, headers, _ = self.request('/api/meta', cookie=cookie, **remote)
+        self.assertEqual(status, 200)
+        self.assertIn(cookie + ';', headers['Set-Cookie'])
+        self.assertIn('Secure', headers['Set-Cookie'])
+        self.assertIn('HttpOnly', headers['Set-Cookie'])
+        self.assertNotIn('Set-Cookie', self.request('/api/meta', cookie=cookie, **remote)[1])
+        with self.relay.connect() as c:
+            c.execute('UPDATE sessions SET expires=?', (time.time() - 1,))
+        self.assertEqual(self.request('/api/meta', cookie=cookie, **remote)[0], 401)
+        self.assertFalse(restarted.renew_session(value))
+
+    def test_only_local_stop_pauses_automatic_recovery_and_preserves_pairing(self):
+        token = (self.relay.root / 'pairing-token').read_bytes()
+        cookie = self.paired()
+        flag = self.relay.root / 'service.paused'
+        with mock.patch.object(self.server, 'shutdown') as shutdown:
+            self.assertEqual(self.request('/api/local/stop', {},
+                extra={'X-Forwarded-Proto': 'https'})[0], 403)
+            self.assertFalse(flag.exists())
+            self.assertEqual(self.request('/api/local/stop', {})[0], 200)
+            self.assertTrue(flag.exists())
+        self.assertEqual((self.relay.root / 'pairing-token').read_bytes(), token)
+        self.assertTrue(self.relay.session(cookie.split('=', 1)[1]))
 
     def test_update_checks_allow_local_or_paired_access_and_validate_manual_origin(self):
         result = {'current_version': '1.3.16', 'available': False}

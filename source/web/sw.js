@@ -1,4 +1,4 @@
-const VERSION='1.3.8-rc.3';
+const VERSION='1.3.8';
 const CACHE='codex-relay-mobile-v9';
 const SHELL=['/','/style.css','/app.js','/updates.js','/marked.js','/purify.js','/manifest.webmanifest','/icon-192.png','/icon-512.png'];
 self.addEventListener('install',event=>event.waitUntil(caches.open(CACHE).then(cache=>cache.addAll(SHELL)).then(()=>self.skipWaiting())));

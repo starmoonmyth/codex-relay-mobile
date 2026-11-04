@@ -34,7 +34,7 @@ pyz = PYZ(a.pure)
         icon = work/'Mobile.icns'
         subprocess.run(['/usr/bin/iconutil','-c','icns',str(iconset),'-o',str(icon)],check=True)
         info = {'CFBundleDisplayName':'Codex 手机消息助手','CFBundleShortVersionString':APP_VERSION,
-                'CFBundleVersion':'22','LSMinimumSystemVersion':'14.0','LSUIElement':True}
+                'CFBundleVersion':'26','LSMinimumSystemVersion':'14.0','LSUIElement':True}
         spec = common + f"""exe = EXE(pyz,a.scripts,[],exclude_binaries=True,name='CodexRelayMobile',console=False,
           target_arch={platform.machine()!r},codesign_identity=None)
 coll = COLLECT(exe,a.binaries,a.datas,name='CodexRelayMobile')

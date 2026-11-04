@@ -1,5 +1,6 @@
 const $ = id => document.getElementById(id);
 const state = {chat:null,chats:[],meta:null,busy:false,refreshing:false,snapshot:'',lastList:0,modelInfo:null,modelSaving:false,lastData:null,online:true};
+let booting=false,pairingToken=null;
 const attachmentDrafts = new Map();
 function chatStatus(data) {
   if(state.busy)return 'sending';
@@ -18,8 +19,8 @@ function chatStatus(data) {
   if(turn==='needsInput')return 'needs_input';
   if(turn==='failed')return 'failed';
   if(turn==='interrupted')return 'interrupted';
-  if(turn==='completed'||latest?.grok_finished||latest?.status==='已完成')return 'completed';
-  if(['claude','grok'].includes(data.chat.provider)){
+  if(turn==='completed'||data.chat.provider!=='grok'&&(latest?.grok_finished||latest?.status==='已完成'))return 'completed';
+  if(data.chat.provider==='claude'){
     const last=data.messages.at(-1);
     if(last?.role==='user')return 'working';
     if(last?.role==='assistant')return 'completed';
@@ -64,11 +65,12 @@ async function api(path, body) {
   catch {throw Error('电脑响应超时或连接中断，请确认电脑与 Tailscale 在线。');}
   finally{clearTimeout(timeout);}
   const value = await response.json();
-  if(response.status===401) { showLogin(); throw Error('请先配对这台电脑。'); }
+  if(response.status===401) { showLogin(); const error=Error('此浏览器尚未配对，或配对已失效。请重新配对这台电脑，原主屏幕图标可继续使用。');error.status=401;throw error; }
   if(!response.ok) {const error=Error(value.error || `请求失败 (${response.status})`);error.status=response.status;throw error;}
   return value;
 }
-function showLogin() { document.body.classList.remove('chat-layout','keyboard-open');$('workspace').hidden=true;$('login').hidden=false; }
+function showLogin() { document.body.classList.remove('chat-layout','keyboard-open');$('reconnect').hidden=true;$('workspace').hidden=true;$('login').hidden=false; }
+function showReconnect(text) { document.body.classList.remove('chat-layout','keyboard-open');$('login').hidden=true;$('workspace').hidden=true;$('reconnect').hidden=false;$('reconnect-status').textContent=text; }
 function drawer(open) { document.body.classList.toggle('drawer',open); $('scrim').hidden=!open; }
 function node(tag, className, text) { const item=document.createElement(tag); if(className)item.className=className; if(text!==undefined)item.textContent=text; return item; }
 function timeLabel(raw) { const date=new Date(raw>1e12?raw:raw*1000),days=Math.floor((Date.now()-date)/86400000); return days===0?'今天':days===1?'昨天':date.toLocaleDateString('zh-CN',{month:'numeric',day:'numeric'}); }
@@ -443,8 +445,14 @@ $('model-form').onsubmit=async event=>{
   finally{state.modelSaving=false;$('save-model').disabled=false;updateSend();}
 };
 async function boot() {
+  if(booting)return;
+  booting=true;$('retry-connection').disabled=true;
   try {
-    state.meta=await api('/api/meta');$('login').hidden=true;$('workspace').hidden=false;document.body.classList.add('chat-layout');updateViewport();
+    if(pairingToken){
+      await api('/api/pair',{token:pairingToken});pairingToken=null;
+      history.replaceState(null,'',location.pathname+location.search);
+    }
+    state.meta=await api('/api/meta');$('reconnect').hidden=true;$('login').hidden=true;$('workspace').hidden=false;document.body.classList.add('chat-layout');updateViewport();
     $('device').replaceChildren();
     const peers=state.meta.peers.length?state.meta.peers:[{label:state.meta.label,origin:state.meta.origin}];
     for(const peer of peers) {const option=node('option','',peer.label+(peer.origin===state.meta.origin?' · 此电脑':''));option.value=peer.origin;option.selected=peer.origin===state.meta.origin;$('device').append(option);}
@@ -458,9 +466,11 @@ async function boot() {
     await loadNotificationSettings();
     if(parameters.has('notifications'))$('notification-settings').showModal();
     prepareNotificationWorker().catch(error=>{$('notification-state').textContent=error.message;});
-  }catch(error){if($('workspace').hidden){showLogin();$('pair-error').textContent=error.message;}else{connection('连接中断',false);notice(error.message);}}
+  }catch(error){if(error.status===401||pairingToken&&error.status===400){showLogin();$('pair-error').textContent=error.message;}else if($('workspace').hidden){showReconnect(error.message+' 正在自动重连…');}else{connection('连接中断 · 自动重连中',false);notice(error.message);}}
+  finally{booting=false;$('retry-connection').disabled=false;}
 }
-$('pair-form').onsubmit=async event=>{event.preventDefault();try{await api('/api/pair',{token:$('token').value.trim()});$('token').value='';$('pair-error').textContent='';await boot();}catch(error){$('pair-error').textContent=error.message;}};
+$('retry-connection').onclick=()=>boot();
+$('pair-form').onsubmit=async event=>{event.preventDefault();try{await api('/api/pair',{token:$('token').value.trim()});pairingToken=null;history.replaceState(null,'',location.pathname+location.search);$('token').value='';$('pair-error').textContent='';await boot();}catch(error){$('pair-error').textContent=error.message;}};
 $('composer').onsubmit=async event=>{
   event.preventDefault();if(state.busy||!state.chat||$('send').disabled)return;
   const id=state.chat.id,text=$('message').value,image_ids=imageIds();const previous=pending(id);
@@ -498,8 +508,9 @@ $('jump').onclick=()=>{$('conversation').scrollTop=$('conversation').scrollHeigh
 $('conversation').onscroll=()=>{const box=$('conversation');if(box.scrollHeight-box.scrollTop-box.clientHeight<100)$('jump').hidden=true;markVisibleCompletion();};
 for(const dialog of document.querySelectorAll('dialog'))dialog.addEventListener('close',markVisibleCompletion);
 window.addEventListener('storage',event=>{if(event.key?.startsWith('seen-completion:'))drawList();});
-document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state.meta)refreshChat();});
-window.addEventListener('online',()=>{if(state.meta)refreshChat();});
+function recoverConnection() {if(!$('reconnect').hidden)boot();else if(state.meta&&!$('workspace').hidden)refreshChat();}
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)recoverConnection();});
+window.addEventListener('online',recoverConnection);
 const viewportState={frame:0,width:0,fullHeight:0};
 function updateViewport() {
   cancelAnimationFrame(viewportState.frame);
@@ -523,13 +534,14 @@ document.addEventListener('focusin',updateViewport);
 document.addEventListener('focusout',()=>setTimeout(updateViewport,100));
 updateViewport();
 setInterval(async()=>{
+  if(!document.hidden&&!$('reconnect').hidden){boot();return;}
   if(document.hidden||$('workspace').hidden||state.refreshing)return;
   state.refreshing=true;try{await refreshChat();if(Date.now()-state.lastList>5000)await loadChats();}catch{}finally{state.refreshing=false;}
 },3000);
 (async()=>{
-  const fragment=new URLSearchParams(location.hash.slice(1));const token=fragment.get('pair');
-  if(location.hash)history.replaceState(null,'',location.pathname);
-  if(token){try{await api('/api/pair',{token});}catch(error){showLogin();$('pair-error').textContent=error.message;return;}}
+  showReconnect('正在恢复原有连接…');
+  const fragment=new URLSearchParams(location.hash.slice(1));pairingToken=fragment.get('pair');
+  if(location.hash&&!pairingToken)history.replaceState(null,'',location.pathname+location.search);
   await boot();
 })();
 
@@ -713,7 +725,7 @@ async function currentNotificationWorker() {
   await registration.update();
   const deadline=Date.now()+15000;
   while(Date.now()<deadline) {
-    try{const info=await workerInfo(registration.active);if(info.version==='1.3.8-rc.3'&&info.push_handler)return registration;}catch{}
+    try{const info=await workerInfo(registration.active);if(info.version==='1.3.8'&&info.push_handler)return registration;}catch{}
     await new Promise(resolve=>setTimeout(resolve,250));
   }
   throw Error('通知组件更新未完成。请关闭主屏幕应用后重新打开，再点“重新连接系统推送”。');
@@ -739,7 +751,7 @@ async function inspectNotificationWorker() {
   const permission='Notification'in window?Notification.permission:'unsupported';
   let version='未连接';
   try{const registration=await navigator.serviceWorker.getRegistration();const info=await workerInfo(registration?.active);version=info.version;}catch{}
-  $('notification-diagnostics').textContent=`应用 1.3.8-rc.3 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
+  $('notification-diagnostics').textContent=`应用 1.3.8 · 通知组件 ${version} · ${standalone?'主屏幕模式':'浏览器模式'} · 权限 ${permission==='granted'?'已允许':permission==='denied'?'已拒绝':'未允许'}`;
   await api('/api/notifications/client',{permission,standalone,worker:version});
   return {permission,standalone,version};
 }

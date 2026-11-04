@@ -78,6 +78,16 @@ class UpdateTests(unittest.TestCase):
         self.assertFalse(fresh.check()['available'])
         self.assertIsNone(fresh.check()['latest_version'])
 
+    def test_published_local_build_does_not_alert_until_a_later_release(self):
+        checker = Updates(self.root, current='1.3.17', baseline='1.3.8-rc.3')
+        self.network.return_value.json.return_value = [release('v1.3.8-rc.3')]
+        result = checker.check()
+        self.assertFalse(result['available'])
+        self.assertFalse(Updates(self.root, current='1.3.17', baseline='1.3.8-rc.3').check()['available'])
+        self.network.return_value.json.return_value = [release('v1.3.8-rc.4')]
+        with mock.patch('updates.time.time', return_value=result['checked_at'] + 61):
+            self.assertTrue(checker.check(force=True)['available'])
+
     def test_corrupt_cache_and_invalid_release_data_can_be_rechecked(self):
         (self.root / 'update-check.json').write_text('[]')
         checker = Updates(self.root, current='1.3.16', baseline='1.3.8-rc.2')
@@ -86,6 +96,17 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(result['error'])
         self.assertEqual(result['release_url'], RELEASES_URL)
         self.assertIsNone(result['latest_version'])
+
+    def test_stable_public_baseline_keeps_equivalent_local_build_current(self):
+        checker = Updates(self.root, current='1.3.19', baseline='1.3.8')
+        self.network.return_value.json.return_value = release('v1.3.8')
+        result = checker.check()
+        self.assertEqual(result['channel'], 'stable')
+        self.assertFalse(result['available'])
+        self.assertFalse(Updates(self.root, current='1.3.19', baseline='1.3.8').check()['available'])
+        self.network.return_value.json.return_value = release('v1.3.9')
+        with mock.patch('updates.time.time', return_value=result['checked_at'] + 61):
+            self.assertTrue(checker.check(force=True)['available'])
 
 
 if __name__ == '__main__':

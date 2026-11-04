@@ -8,7 +8,7 @@ import threading
 import time
 
 from claude_backend import ClaudeData, claude_branch, internal_message
-from grok_backend import event_id, event_time, run_status, native_turn_state
+from grok_backend import event_id, event_time, run_status, native_turn_state, current_turn_updates
 
 
 STATES = {'inProgress': 'working', 'needsInput': 'needs_input', 'completed': 'completed',
@@ -25,7 +25,9 @@ def transcript_activity(chat):
     if chat.source == 'grok-bot':
         return activity
     last_agent, group = '', None
-    entries = claude_branch(chat) if chat.provider == 'claude' else ClaudeData._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024)
+    entries = (claude_branch(chat) if chat.provider == 'claude' else
+        current_turn_updates(pathlib.Path(chat.rollout_path)) if chat.provider == 'grok' else
+        ClaudeData._read(pathlib.Path(chat.rollout_path), max_bytes=2 * 1024 * 1024))
     for index, entry in enumerate(entries):
         if chat.provider == 'claude':
             if entry.get('isSidechain') or internal_message(entry):
@@ -73,7 +75,7 @@ def transcript_activity(chat):
                 group = None
     if chat.provider == 'grok' and activity['state'] != 'idle':
         status = {'working': 'inProgress', 'completed': 'completed', 'interrupted': 'interrupted', 'failed': 'failed'}[activity['state']]
-        native = native_turn_state(chat, status, activity.get('user_message_id', ''))
+        native = native_turn_state(chat, status, activity.get('user_message_id', ''), activity.get('user_timestamp_ms', 0))
         state = STATES.get(native['status'], 'idle')
         if state == 'completed' and activity['state'] != 'completed':
             activity.update(completed(native['turn_id'], last_agent))
